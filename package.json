@@ -1,0 +1,34 @@
+{
+  "name": "@dotrino/update",
+  "version": "0.1.0",
+  "description": "Enterarse de que hay versión nueva, y traerla verificada cuando lo diga una persona. Para los daemons, servicios y CLIs del ecosistema Dotrino.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js"
+    },
+    "./fetch": {
+      "import": "./src/fetch.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "keywords": [
+    "dotrino",
+    "update",
+    "provenance",
+    "sigstore"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imdotrino/dotrino-update.git"
+  }
+}
