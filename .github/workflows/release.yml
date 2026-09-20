@@ -1,0 +1,64 @@
+# Publica @dotrino/update DESDE CI, no desde el portátil de nadie.
+#
+# Nunca se publicó a mano y no va a empezar: el `npm test` de aquí corre ANTES de publicar,
+# que es lo único que impide sacar algo roto (`CLAUDE.md`, «al terminar una tarea»). Y en
+# este paquete importa el doble — es el que decide si un binario descargado se instala.
+#
+# Sin ningún token: npm cambia un credencial efímero por la identidad OIDC de esta ejecución
+# (publicación de confianza) y firma la procedencia él solo. La confianza se declara en
+# npmjs.com, por paquete: repo `imdotrino/dotrino-update`, workflow `release.yml`. El nombre de este archivo tiene que coincidir exacto.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write      # crear la release y subirle el SBOM
+  id-token: write      # OIDC: la publicación de confianza y la atestación
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # La publicación de confianza pide Node ≥22.14 y npm ≥11.5.1, y Node 22 trae
+          # npm 10: por eso el paso siguiente lo sube.
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - run: npm i -g npm@latest
+      - run: npm install
+
+      # LAS PRUEBAS, ANTES DE PUBLICAR. Es lo que separa «se publicó» de «se publicó algo
+      # que funciona», y la única razón por la que esto no es `npm publish` a mano.
+      - run: npm test
+
+      # EL SBOM SE SACA DE LA RAÍZ, que es donde están el `package-lock.json` y los
+      # `node_modules`: `lib/` es solo el paquete publicable y no tiene dependencias
+      # propias (las suyas son `peerDependencies`). Hacerlo dentro de `lib` falla con
+      # «no evidence», que es correcto — ahí no hay nada que inventariar.
+      - name: SBOM (CycloneDX)
+        run: |
+          npx --yes @cyclonedx/cyclonedx-npm@latest \
+            --omit dev --output-format JSON \
+            --output-file "sbom-$(node -p "require('./package.json').version").cdx.json"
+
+      - name: Atestiguar el SBOM
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'sbom-*.cdx.json'
+
+      # La procedencia sale sola: npm la genera y la firma, sin `--provenance`.
+      - name: Publicar en npm
+        run: npm publish --access public
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: 'sbom-*.cdx.json'
+          generate_release_notes: true
