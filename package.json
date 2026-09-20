@@ -10,6 +10,9 @@
     },
     "./fetch": {
       "import": "./src/fetch.js"
+    },
+    "./notice": {
+      "import": "./src/notice.js"
     }
   },
   "files": [

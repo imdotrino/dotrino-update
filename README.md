@@ -78,6 +78,31 @@ Para que esto funcione, el `release.yml` del producto tiene que atestiguar sus a
       dist/*.tar.gz
 ```
 
+## En un comando (`dotrino-env`, `dotrino-vault`, los agentes)
+
+Un daemon mira una vez al día y no le corre prisa. Un comando dura medio segundo y se
+invoca cien veces al día, así que aquí manda otra regla: **avisar no puede hacer lenta la
+orden**.
+
+```js
+import { printUpdateNotice } from '@dotrino/update/notice'
+
+// AL FINAL del comando, cuando el trabajo ya está hecho
+await printUpdateNotice({
+  current: VERSION, source: 'npm', pkg: '@dotrino/env', product: 'dotrino-env',
+  how: 'actualiza con: npm i -g @dotrino/env'
+})
+```
+
+- Se mira **una vez al día**; el resto sale de una caché (`~/.cache/dotrino/update/`).
+- Tope de **1,5 s**, y solo en la consulta que toca.
+- Sale por **stderr**, nunca por stdout: lo de un comando se canaliza —`dotrino-env run`
+  mete su salida en otro programa— y colarle ahí una línea de cortesía es romperle la
+  tubería a alguien.
+- `DOTRINO_NO_UPDATE_NOTICE=1` lo apaga.
+- Si no se pudo mirar, **la caché no se pisa**: apuntar «al día» cuando lo que pasó es que
+  no había red deja una máquina convencida para siempre de que está actualizada.
+
 ## Instalar
 
 No lo hace este paquete: dónde va un binario es cosa de cada producto (un `.deb` pide root,
