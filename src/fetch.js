@@ -101,12 +101,17 @@ export async function verifyArtifact (file, { repo, run = execFileSync, fetchImp
 }
 
 /**
- * `gh` del PATH, o el de `~/.local/bin` si no está ahí: un servicio de systemd no suele tener
- * esa carpeta en su PATH, y es donde se instala `gh` sin permisos de administrador.
+ * El `gh` de `~/.local/bin` si existe; si no, el del PATH.
+ *
+ * El de `~/.local/bin` GANA aunque haya otro en el PATH, y no es un repliegue: es el que
+ * instala el usuario sin permisos de administrador precisamente para poder verificar, y el del
+ * sistema suele ser viejo (anterior a `gh attestation`). Además un servicio de systemd no
+ * tiene esa carpeta en su PATH: el 2026-09-24 la bóveda de la PC del dueño encontraba
+ * `/usr/bin/gh` 2.46 y no se actualizaba, con un `gh` bueno instalado al lado.
  */
 function findGh () {
   const local = path.join(os.homedir(), '.local', 'bin', 'gh')
-  return fs.existsSync(local) && !(process.env.PATH || '').split(':').some((d) => fs.existsSync(path.join(d, 'gh'))) ? local : 'gh'
+  return fs.existsSync(local) ? local : 'gh'
 }
 
 /** Bajar y verificar, que es lo que casi siempre se quiere junto. No instala: eso es del producto. */
