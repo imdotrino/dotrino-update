@@ -8,6 +8,9 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { isNewer, latestVersion, checkForUpdate, watchForUpdate } from '../src/index.js'
 import { pickAsset, verifyArtifact, fetchVerified } from '../src/fetch.js'
 
@@ -92,20 +95,51 @@ test('el archivo se elige por máquina, en orden de preferencia', () => {
  * SIN CON QUÉ VERIFICAR, NO SE INSTALA. Es la regla de «nada de repliegues» aplicada al
  * sitio donde más duele: bajar código. Que la URL fuera la correcta no prueba nada.
  */
-test('sin gh no se verifica, y entonces no se sigue', () => {
-  const r = verifyArtifact('/tmp/x.deb', { repo: 'a/b', run: () => { throw new Error('not found') } })
+const okFetch = (bundles) => async () => ({ ok: true, json: async () => ({ attestations: bundles.map((b) => ({ bundle: b })) }) })
+const tmpFile = () => { const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'upd-')), 'x.deb'); fs.writeFileSync(f, 'bytes'); return f }
+
+test('sin gh no se verifica, y entonces no se sigue', async () => {
+  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run: () => { throw new Error('not found') } })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'NO_GH')
   assert.match(r.reason, /gh attestation verify/, 'y dice cómo comprobarlo a mano')
 })
 
-test('una firma que no cuadra se dice con su código, no se traga', () => {
-  const r = verifyArtifact('/tmp/x.deb', {
-    repo: 'a/b',
-    run: (cmd, args) => { if (args[0] === '--version') return ''; const e = new Error('x'); e.stderr = 'no attestations found'; throw e }
-  })
+test('un gh que no sabe verificar (anterior a `attestation`) se dice aparte', async () => {
+  const run = (cmd, args) => { if (args[0] === '--version') return ''; throw new Error('unknown command "attestation"') }
+  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run })
+  assert.equal(r.code, 'GH_TOO_OLD')
+})
+
+test('sin atestación para ESTE archivo no se instala', async () => {
+  const run = () => ''
+  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run, fetchImpl: okFetch([]) })
+  assert.equal(r.code, 'NO_ATTESTATION')
+  const caida = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run, fetchImpl: async () => ({ ok: false, status: 503 }) })
+  assert.equal(caida.code, 'NO_ATTESTATION', 'que GitHub no conteste tampoco es «está bien»')
+})
+
+test('se verifica SIN sesión: la atestación va por --bundle y el token se vacía', async () => {
+  const f = tmpFile()
+  let llamada = null
+  const run = (cmd, args, opts) => { if (args[1] === 'verify' && args[2] === f) llamada = { args, opts }; return 'ok' }
+  let pedida = null
+  const fetchImpl = async (url, o) => { pedida = { url, o }; return okFetch([{ mediaType: 'x' }])() }
+  const r = await verifyArtifact(f, { repo: 'a/b', gh: 'gh', run, fetchImpl })
+  assert.equal(r.ok, true)
+  assert.match(pedida.url, /^https:\/\/api\.github\.com\/repos\/a\/b\/attestations\/sha256:[0-9a-f]{64}$/)
+  assert.equal(pedida.o.headers.authorization, undefined, 'sin credenciales')
+  const i = llamada.args.indexOf('--bundle')
+  assert.ok(i > 0, 'con --bundle')
+  assert.equal(fs.readFileSync(llamada.args[i + 1], 'utf8').trim(), JSON.stringify({ mediaType: 'x' }))
+  assert.equal(llamada.opts.env.GH_TOKEN, '')
+})
+
+test('una firma que no cuadra se dice con su código, no se traga', async () => {
+  const run = (cmd, args) => { if (args[1] === 'verify' && args.length > 3) { const e = new Error('x'); e.stderr = 'verifying with issuer "sigstore.dev"'; throw e } return '' }
+  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run, fetchImpl: okFetch([{}]) })
   assert.equal(r.code, 'BAD_SIGNATURE')
-  assert.match(r.reason, /no attestations found/)
+  assert.match(r.reason, /sigstore/)
 })
 
 test('bajar y verificar: si la firma falla, se DICE dónde quedó el archivo sin instalarlo', async () => {

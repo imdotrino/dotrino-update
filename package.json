@@ -1,6 +1,6 @@
 {
   "name": "@dotrino/update",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Enterarse de que hay versión nueva, y traerla verificada cuando lo diga una persona. Para los daemons, servicios y CLIs del ecosistema Dotrino.",
   "type": "module",
   "main": "src/index.js",
