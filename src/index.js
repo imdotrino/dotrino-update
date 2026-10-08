@@ -26,8 +26,10 @@
  *     enciende a propósito), y también verifica antes de instalar.
  *
  * Que la URL sea la correcta no prueba nada: quien está siendo atacado también cree que su
- * URL es la buena. Por eso lo que se baja se contrasta contra la atestación de sigstore que
- * ata el archivo a su commit y a su workflow, y si no se puede comprobar NO SE INSTALA.
+ * URL es la buena. Por eso lo que se baja se contrasta antes de instalarlo —un binario,
+ * contra la atestación de sigstore de su release; un paquete de npm, contra el hash que su
+ * release de GitHub adjunta (dos canales, sin firma: ver `./npm`)— y si no se puede
+ * comprobar NO SE INSTALA.
  * Sin repliegues: «no se pudo mirar» y «estás al día» son cosas distintas y esto nunca las
  * confunde.
  */

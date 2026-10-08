@@ -1,6 +1,6 @@
 {
   "name": "@dotrino/update",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Enterarse de que hay versión nueva, traerla verificada e instalarla sola. Para los daemons, servicios y CLIs del ecosistema Dotrino.",
   "type": "module",
   "main": "src/index.js",
@@ -16,9 +16,16 @@
     },
     "./npm": {
       "import": "./src/npm.js"
+    },
+    "./integrity": {
+      "import": "./src/integrity.js"
     }
   },
+  "bin": {
+    "dotrino-update": "bin/cli.js"
+  },
   "files": [
+    "bin",
     "src",
     "README.md",
     "LICENSE"

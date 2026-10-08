@@ -6,26 +6,27 @@
  * global se toca, y que nada se instala sin haberse comprobado — ni cuando no se pudo
  * preguntar si hacía falta permiso.
  *
- * Al final, UNA prueba contra el registro real (se salta sin red o sin `gh`).
+ * Al final, UNA prueba contra el registro y la release reales (se salta sin red).
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 import {
   installKind, supervised, verifyNpmPackage, installNpmGlobal, selfUpdateNpm, watchSelfUpdateNpm, findNpm,
-  readUpdatePrefs, writeUpdatePrefs, takeUpdateMarker, updatePrefsCommand, updateStatusText, UPDATE_PREFS_FILE, UPDATE_MARKER_FILE, UPDATE_ASKED_FILE, ASK_TTL_MS
+  readUpdatePrefs, writeUpdatePrefs, takeUpdateMarker, updatePrefsCommand, updateStatusText, UPDATE_PREFS_FILE, UPDATE_MARKER_FILE, UPDATE_ASKED_FILE, UPDATE_NEEDS_ROOT_FILE, ASK_TTL_MS
 } from '../src/npm.js'
-import { findGh } from '../src/fetch.js'
+import { integrityOf, packageOfTarball, buildIntegrity } from '../src/integrity.js'
+import zlib from 'node:zlib'
+import { execFileSync } from 'node:child_process'
 
 const PKG = '@dotrino/demo'
 const REPO = 'imdotrino/dotrino-demo'
-const SLSA = 'https://slsa.dev/provenance/v1'
+const TARBALL = Buffer.from('tarball')
 
 /** Una máquina de mentira: un prefijo global con la pieza instalada en `current`. */
-function mundo ({ current = '1.0.0', latest = '1.1.0', gh = 'ok', atestacion = {}, sinAtestacion = false, npmInstala = true, instalaVersion = null } = {}) {
+function mundo ({ current = '1.0.0', latest = '1.1.0', release = 'ok', npmInstala = true, instalaVersion = null } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'upd-npm-'))
   const prefix = path.join(home, 'prefix')
   const root = path.join(prefix, 'lib', 'node_modules')
@@ -46,34 +47,29 @@ function mundo ({ current = '1.0.0', latest = '1.1.0', gh = 'ok', atestacion = {
         return ''
       }
     }
-    if (cmd === 'gh') {
-      if (gh === 'missing') throw new Error('ENOENT')
-      if (args[0] === 'attestation' && args[2] === '--help') { if (gh === 'old') throw new Error('unknown command'); return '' }
-      if (args[0] === 'attestation' && args[1] === 'verify' && args[2] !== '--help') {
-        if (gh === 'bad') throw Object.assign(new Error('x'), { stderr: 'Error: verifying with issuer "sigstore.dev"' })
-        return '[]'
-      }
-      return 'gh version 2.101.0'
-    }
     return ''
   }
-  const st = {
-    subject: [{ name: `pkg:npm/%40dotrino/demo@${latest}`, digest: { sha512: 'aa' } }],
-    predicate: {
-      buildDefinition: {
-        externalParameters: { workflow: { repository: `https://github.com/${REPO}`, path: '.github/workflows/release.yml', ...atestacion } },
-        resolvedDependencies: [{ digest: { gitCommit: 'c0ffee' } }]
-      }
-    }
-  }
-  const bundle = { dsseEnvelope: { payload: Buffer.from(JSON.stringify(st)).toString('base64') } }
+  // Lo que la release de GitHub dice que midió. `release` elige qué pasa con ese archivo.
+  const medido = {
+    ok: { v: 1, packages: { [PKG]: { version: latest, integrity: integrityOf(TARBALL) } } },
+    otroHash: { v: 1, packages: { [PKG]: { version: latest, integrity: integrityOf(Buffer.from('otra cosa')) } } },
+    otraVersion: { v: 1, packages: { [PKG]: { version: '9.9.9', integrity: integrityOf(TARBALL) } } },
+    otroPaquete: { v: 1, packages: { '@dotrino/otro': { version: latest, integrity: integrityOf(TARBALL) } } },
+    sinForma: { hola: 1 }
+  }[release]
   const fetched = []
   const fetchImpl = async (url) => {
     fetched.push(url)
     const json = (body) => ({ ok: true, json: async () => body })
     if (url.includes('/dist-tags')) return latest ? json({ latest }) : { ok: false, status: 503 }
-    if (url.includes('/-/npm/v1/attestations/')) return json({ attestations: sinAtestacion ? [] : [{ predicateType: 'other', bundle: {} }, { predicateType: SLSA, bundle }] })
-    if (url.endsWith('.tgz')) return { ok: true, arrayBuffer: async () => new TextEncoder().encode('tarball').buffer }
+    if (url === `https://github.com/${REPO}/releases/download/v${latest}/npm-integrity.json`) {
+      if (release === '404') return { ok: false, status: 404 }
+      if (release === '500') return { ok: false, status: 500 }
+      if (release === 'caida') throw new Error('ECONNRESET')
+      const body = release === 'enorme' ? Buffer.alloc(70 * 1024, 0x20) : release === 'basura' ? Buffer.from('<html>') : Buffer.from(JSON.stringify(medido))
+      return { ok: true, status: 200, arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) }
+    }
+    if (url.endsWith('.tgz')) return { ok: true, arrayBuffer: async () => TARBALL.buffer.slice(TARBALL.byteOffset, TARBALL.byteOffset + TARBALL.byteLength) }
     if (url.endsWith(`/${latest}`)) return json({ dist: { tarball: `https://registry.npmjs.org/@dotrino/demo/-/demo-${latest}.tgz` } })
     return { ok: false, status: 404 }
   }
@@ -82,7 +78,7 @@ function mundo ({ current = '1.0.0', latest = '1.1.0', gh = 'ok', atestacion = {
     home, root, prefix, calls, fetched, lines,
     opts: {
       pkg: PKG, current, repo: REPO, entry: path.join(pkgDir, 'bin', 'cli.js'),
-      run, fetchImpl, npm: 'npm', gh: 'gh', home, env: {}, log: (m) => lines.push(m)
+      run, fetchImpl, npm: 'npm', home, env: {}, log: (m) => lines.push(m)
     },
     instalada: () => JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8')).version,
     trabajo: () => { const d = path.join(home, '.local', 'share', 'dotrino', 'update'); return fs.existsSync(d) ? fs.readdirSync(d) : [] }
@@ -147,48 +143,100 @@ test('el npm es el del mismo Node que corre la pieza', () => {
 
 // --- verificar -------------------------------------------------------------------------
 
-test('verificar: baja el tarball, le pasa a gh la procedencia de ESE archivo, repo y workflow', async () => {
+test('verificar: el hash viene de la release de GitHub, el archivo de npm, y tienen que coincidir', async () => {
   const m = mundo()
   const v = await verifyNpmPackage({ ...m.opts, version: '1.1.0' })
   assert.equal(v.ok, true)
-  assert.equal(v.commit, 'c0ffee')
-  assert.equal(fs.readFileSync(v.file, 'utf8'), 'tarball')
+  assert.equal(v.integrity, integrityOf(TARBALL))
+  assert.equal(fs.readFileSync(v.file, 'utf8'), 'tarball', 'devuelve ESE archivo, para instalar ese y no otro')
   assert.ok(v.file.startsWith(path.join(m.home, '.local', 'share', 'dotrino', 'update')), 'en el disco del usuario, no en /tmp')
-  const gh = m.calls.find((c) => c.startsWith('gh attestation verify') && !c.includes('--help'))
-  assert.match(gh, new RegExp(`--repo ${REPO} --signer-workflow ${REPO}/.github/workflows/release.yml`))
-  assert.match(gh, /--digest-alg sha512/)
-  const bundles = fs.readFileSync(path.join(v.dir, 'provenance.jsonl'), 'utf8').trim().split('\n')
-  assert.equal(bundles.length, 1, 'solo la procedencia SLSA, no la otra atestación')
+  assert.ok(m.fetched.includes(`https://github.com/${REPO}/releases/download/v1.1.0/npm-integrity.json`))
+  assert.equal(m.calls.some((c) => c.startsWith('gh')), false, 'sin gh')
   fs.rmSync(v.dir, { recursive: true })
 })
 
-for (const [nombre, world, code] of [
-  ['sin gh', { gh: 'missing' }, 'NO_GH'],
-  ['con un gh que no sabe verificar', { gh: 'old' }, 'GH_TOO_OLD'],
-  ['publicada sin procedencia', { sinAtestacion: true }, 'NO_ATTESTATION'],
-  ['salida de otro repo', { atestacion: { repository: 'https://github.com/otro/repo' } }, 'WRONG_SOURCE'],
-  ['salida de otro workflow', { atestacion: { path: '.github/workflows/otro.yml' } }, 'WRONG_SOURCE'],
-  ['con una firma que no cuadra', { gh: 'bad' }, 'BAD_SIGNATURE']
+for (const [nombre, release, code] of [
+  ['la release no trae el archivo', '404', 'NO_INTEGRITY_FILE'],
+  ['GitHub contesta un error', '500', 'INTEGRITY_UNREACHABLE'],
+  ['GitHub no contesta', 'caida', 'INTEGRITY_UNREACHABLE'],
+  ['el archivo no es JSON', 'basura', 'INTEGRITY_UNREACHABLE'],
+  ['el archivo no tiene la forma', 'sinForma', 'INTEGRITY_UNREACHABLE'],
+  ['el archivo pesa lo que no pesa un JSON de hashes', 'enorme', 'INTEGRITY_UNREACHABLE'],
+  ['el archivo nombra otro paquete', 'otroPaquete', 'WRONG_PACKAGE'],
+  ['el archivo nombra otra versión', 'otraVersion', 'WRONG_PACKAGE'],
+  ['lo que da npm no es lo que midió el release', 'otroHash', 'INTEGRITY_MISMATCH']
 ]) {
-  test(`verificar ${nombre}: no vale, lo dice con su código y no deja nada en el disco`, async () => {
-    const m = mundo(world)
+  test(`verificar, cuando ${nombre}: no vale, lo dice con su código y no deja nada en el disco`, async () => {
+    const m = mundo({ release })
     const v = await verifyNpmPackage({ ...m.opts, version: '1.1.0' })
-    assert.deepEqual([v.ok, v.code], [false, code])
+    assert.deepEqual([v.ok, v.code], [false, code], v.reason)
     assert.ok(v.reason)
     assert.deepEqual(m.trabajo(), [], 'la carpeta de trabajo se borra')
   })
 }
 
-test('verificar: el registro no contesta, o señala un tarball fuera del registro', async () => {
+test('verificar: el registro no contesta, señala un tarball fuera del registro, o no entrega el archivo', async () => {
   const m = mundo()
-  const caido = await verifyNpmPackage({ ...m.opts, version: '1.1.0', fetchImpl: async () => ({ ok: false, status: 503 }) })
+  const gh = (u) => u.startsWith('https://github.com/')
+  const caido = await verifyNpmPackage({ ...m.opts, version: '1.1.0', fetchImpl: async (u) => gh(u) ? m.opts.fetchImpl(u) : { ok: false, status: 503 } })
   assert.equal(caido.code, 'REGISTRY_UNREACHABLE')
   const fuera = await verifyNpmPackage({
     ...m.opts, version: '1.1.0',
-    fetchImpl: async (u) => u.includes('attestations') ? m.opts.fetchImpl(u) : { ok: true, json: async () => ({ dist: { tarball: 'https://evil.example/demo.tgz' } }) }
+    fetchImpl: async (u) => gh(u) ? m.opts.fetchImpl(u) : { ok: true, json: async () => ({ dist: { tarball: 'https://evil.example/demo.tgz' } }) }
   })
   assert.equal(fuera.code, 'REGISTRY_UNREACHABLE')
+  const sinArchivo = await verifyNpmPackage({ ...m.opts, version: '1.1.0', fetchImpl: async (u) => u.endsWith('.tgz') ? { ok: false, status: 502 } : m.opts.fetchImpl(u) })
+  assert.equal(sinArchivo.code, 'DOWNLOAD_FAILED')
+  assert.deepEqual(m.trabajo(), [])
   assert.equal((await verifyNpmPackage({ pkg: PKG })).code, 'BAD_ARGS')
+})
+
+// --- el lado de CI: medir lo que se va a publicar ----------------------------------------
+
+/** Un `.tgz` mínimo como los de `npm pack`: una cabecera de tar y el package.json. */
+function tgz (files) {
+  const blocks = []
+  for (const [name, text] of Object.entries(files)) {
+    const body = Buffer.from(text)
+    const head = Buffer.alloc(512)
+    head.write(name, 0, 'utf8')
+    head.write(body.length.toString(8).padStart(11, '0') + '\0', 124, 'ascii')
+    head.write('0', 156, 'ascii')
+    blocks.push(head, body, Buffer.alloc((512 - (body.length % 512)) % 512))
+  }
+  blocks.push(Buffer.alloc(1024))
+  return zlib.gzipSync(Buffer.concat(blocks))
+}
+
+test('CI: de cada .tgz sale su nombre, su versión y su sha512, que es el `integrity` de npm', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'upd-ci-'))
+  const a = tgz({ 'package/README.md': 'hola', 'package/package.json': JSON.stringify({ name: '@dotrino/demo', version: '1.1.0' }) })
+  const b = tgz({ 'package/package.json': JSON.stringify({ name: '@dotrino/otro', version: '0.3.0' }) })
+  fs.writeFileSync(path.join(dir, 'a.tgz'), a); fs.writeFileSync(path.join(dir, 'b.tgz'), b)
+  assert.deepEqual(packageOfTarball(a), { name: '@dotrino/demo', version: '1.1.0' })
+  assert.deepEqual(buildIntegrity([path.join(dir, 'a.tgz'), path.join(dir, 'b.tgz')]), {
+    v: 1,
+    packages: {
+      '@dotrino/demo': { version: '1.1.0', integrity: integrityOf(a) },
+      '@dotrino/otro': { version: '0.3.0', integrity: integrityOf(b) }
+    }
+  })
+  assert.match(integrityOf(a), /^sha512-[A-Za-z0-9+/]{86}==$/)
+  assert.throws(() => buildIntegrity([path.join(dir, 'a.tgz'), path.join(dir, 'a.tgz')]), (e) => e.code === 'duplicate-package')
+  assert.throws(() => buildIntegrity([]), (e) => e.code === 'no-files')
+  assert.throws(() => packageOfTarball(Buffer.from('no es gzip')), (e) => e.code === 'bad-tarball')
+  assert.throws(() => packageOfTarball(tgz({ 'package/index.js': 'x' })), (e) => e.code === 'bad-tarball')
+})
+
+test('CI: el comando imprime el JSON, y lo que mide es lo que comprueba quien instala', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'upd-cli-'))
+  const f = path.join(dir, 'demo-1.1.0.tgz')
+  fs.writeFileSync(f, tgz({ 'package/package.json': JSON.stringify({ name: PKG, version: '1.1.0' }) }))
+  const cli = new URL('../bin/cli.js', import.meta.url).pathname
+  const out = JSON.parse(execFileSync(process.execPath, [cli, 'integrity', f], { encoding: 'utf8' }))
+  assert.deepEqual(out, { v: 1, packages: { [PKG]: { version: '1.1.0', integrity: integrityOf(fs.readFileSync(f)) } } })
+  assert.throws(() => execFileSync(process.execPath, [cli, 'integrity'], { stdio: 'pipe' }), (e) => e.status === 2)
+  assert.throws(() => execFileSync(process.execPath, [cli, 'integrity', path.join(dir, 'no-existe.tgz')], { stdio: 'pipe' }), (e) => e.status === 1)
 })
 
 // --- instalar --------------------------------------------------------------------------
@@ -224,8 +272,7 @@ test('POR DEFECTO se actualiza sola: sin `mayUpdate` no pregunta a nadie, verifi
   assert.deepEqual(r, { ok: true, code: 'installed', version: '1.1.0', from: '1.0.0' })
   assert.equal(m.instalada(), '1.1.0')
   assert.deepEqual(avisos, [{ version: '1.1.0', from: '1.0.0', restart: false }], 'sin quien lo levante NO se le dice que salga')
-  const orden = m.calls.filter((c) => /attestation verify (?!--help)|npm install/.test(c)).map((c) => c.split(' ').slice(0, 2).join(' '))
-  assert.deepEqual(orden, ['gh attestation', 'npm install'], 'primero se comprueba, después se instala')
+  assert.ok(m.fetched.findIndex((u) => u.endsWith('npm-integrity.json')) !== -1, 'se comprobó contra la release')
   assert.match(m.calls.find((c) => c.startsWith('npm install')), /demo-1\.1\.0\.tgz/, 'y se instala el archivo comprobado')
   assert.deepEqual(m.trabajo(), [], 'no deja nada en el disco')
   assert.match(m.lines.at(-1), /restart it to run the new version/)
@@ -284,7 +331,7 @@ test('CON APROBACIÓN: se pregunta con la versión, y solo un sí exacto instala
     const r = await selfUpdateNpm({ ...n.opts, mayUpdate: async () => respuesta })
     assert.deepEqual([r.ok, r.code], [false, 'not-approved'], `«${respuesta}» no es un sí`)
     assert.equal(instalo(n), false)
-    assert.equal(n.calls.some((c) => c.startsWith('gh attestation verify') && !c.includes('--help')), false, 'ni se baja nada')
+    assert.equal(n.fetched.some((u) => u.endsWith('.tgz') || u.endsWith('npm-integrity.json')), false, 'ni se baja nada')
   }
 })
 
@@ -297,7 +344,7 @@ test('si no se pudo preguntar NO se instala: no saber si hace falta permiso no e
 })
 
 test('lo que no se pudo comprobar no se instala, con el porqué', async () => {
-  for (const [world, why] of [[{ gh: 'missing' }, 'NO_GH'], [{ sinAtestacion: true }, 'NO_ATTESTATION'], [{ gh: 'bad' }, 'BAD_SIGNATURE']]) {
+  for (const [world, why] of [[{ release: '404' }, 'NO_INTEGRITY_FILE'], [{ release: 'caida' }, 'INTEGRITY_UNREACHABLE'], [{ release: 'otroHash' }, 'INTEGRITY_MISMATCH'], [{ release: 'otroPaquete' }, 'WRONG_PACKAGE']]) {
     const m = mundo(world)
     const r = await selfUpdateNpm(m.opts)
     assert.deepEqual([r.ok, r.code, r.why], [false, 'unverified', why])
@@ -487,7 +534,7 @@ test('un sí también se recuerda: si la instalación falla, no se vuelve a mole
   const dir = conAprobacion()
   let veces = 0
   const mayUpdate = async () => { veces++; return true }
-  const roto = mundo({ gh: 'bad' })
+  const roto = mundo({ release: 'otroHash' })
   assert.equal((await selfUpdateNpm({ ...roto.opts, dir, mayUpdate })).code, 'unverified')
   assert.equal(updateStatusText({ dir, current: '1.0.0' }), '', 'aprobada: no hay nada que reclamar')
   const bien = mundo()
@@ -503,6 +550,64 @@ test('si lo ya preguntado no se puede leer, no se instala y se dice', async () =
   assert.deepEqual([r.ok, r.code, veces], [false, 'asked-unreadable', 0])
   assert.equal(instalo(m), false)
   assert.match(updateStatusText({ dir, current: '1.0.0' }), /no se pudo leer/)
+})
+
+// --- hace falta root: se avisa, no se intenta --------------------------------------------
+
+const sinPermiso = () => { throw new Error('EACCES') }
+
+test('hace falta root: se avisa UNA vez por versión, sobrevive al reinicio, y el estado lo dice', async () => {
+  const dir = carpeta(); const avisos = []
+  const onNeedsRoot = (e) => avisos.push(e)
+  for (let i = 0; i < 3; i++) {
+    const m = mundo()
+    const r = await selfUpdateNpm({ ...m.opts, dir, access: sinPermiso, onNeedsRoot })
+    assert.deepEqual([r.ok, r.code], [false, 'needs-root'], 'el resultado sigue siendo needs-root')
+    assert.equal(instalo(m), false)
+  }
+  assert.deepEqual(avisos, [{ version: '1.1.0', from: '1.0.0' }], 'tres pasadas (tres arranques), un aviso')
+  assert.equal(updateStatusText({ dir, current: '1.0.0' }),
+    'hay una 1.1.0 publicada y esta instalación necesita permisos de administrador para actualizarse: instálala a mano (sudo npm i -g @dotrino/demo@1.1.0)')
+  assert.match(updateStatusText({ dir, current: '1.0.0', lang: 'en' }), /1\.1\.0 is out and this install needs administrator rights to update: install it by hand/)
+  assert.equal(updateStatusText({ dir, current: '1.1.0' }), '', 'instalada a mano: nada que decir')
+
+  await selfUpdateNpm({ ...mundo({ latest: '1.2.0' }).opts, dir, access: sinPermiso, onNeedsRoot })
+  assert.deepEqual(avisos.map((a) => a.version), ['1.1.0', '1.2.0'], 'una versión más nueva vuelve a avisar')
+})
+
+test('hace falta root con los avisos apagados: no avisa, pero el estado lo sigue diciendo', async () => {
+  const dir = carpeta(); writeUpdatePrefs(dir, { notify: false })
+  let avisado = false
+  await selfUpdateNpm({ ...mundo().opts, dir, access: sinPermiso, onNeedsRoot: () => { avisado = true } })
+  assert.equal(avisado, false)
+  assert.match(updateStatusText({ dir, current: '1.0.0' }), /necesita permisos de administrador/)
+  // Y si después los enciende, avisa: de esa versión todavía no se dijo nada.
+  writeUpdatePrefs(dir, { notify: true })
+  await selfUpdateNpm({ ...mundo().opts, dir, access: sinPermiso, onNeedsRoot: () => { avisado = true } })
+  assert.equal(avisado, true)
+})
+
+test('hace falta root y avisar falla: no queda como avisado, se reintenta y se registra', async () => {
+  const dir = carpeta()
+  const m = mundo()
+  const r = await selfUpdateNpm({ ...m.opts, dir, access: sinPermiso, onNeedsRoot: async () => { throw new Error('the vault did not reply') } })
+  assert.equal(r.code, 'needs-root')
+  assert.ok(m.lines.some((l) => /could not tell that @dotrino\/demo 1\.1\.0 needs root to install \(the vault did not reply\)/.test(l)))
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, UPDATE_NEEDS_ROOT_FILE), 'utf8')).notified, false)
+  const avisos = []
+  await selfUpdateNpm({ ...mundo().opts, dir, access: sinPermiso, onNeedsRoot: (e) => avisos.push(e) })
+  await selfUpdateNpm({ ...mundo().opts, dir, access: sinPermiso, onNeedsRoot: (e) => avisos.push(e) })
+  assert.equal(avisos.length, 1)
+})
+
+test('hace falta root: el vigía pasa el aviso, y al instalarse por fin el apunte se borra', async () => {
+  const dir = carpeta(); const avisos = []
+  const m = mundo()
+  const stop = watchSelfUpdateNpm({ ...m.opts, dir, access: sinPermiso, everyMs: 60_000, onNeedsRoot: (e) => avisos.push(e) })
+  await new Promise((r) => setTimeout(r, 60)); stop()
+  assert.equal(avisos.length, 1)
+  await selfUpdateNpm({ ...mundo().opts, dir })
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_NEEDS_ROOT_FILE)), false)
 })
 
 // --- avisar de que se actualizó ----------------------------------------------------------
@@ -531,7 +636,7 @@ test('un marcador de una versión ya superada caduca; uno ilegible se dice', () 
 })
 
 test('si no hay instalación, no hay marcador', async () => {
-  const m = mundo({ gh: 'bad' }); const dir = carpeta()
+  const m = mundo({ release: 'otroHash' }); const dir = carpeta()
   await selfUpdateNpm({ ...m.opts, dir })
   assert.equal(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)), false)
 })
@@ -578,16 +683,16 @@ test('si avisar falla, el marcador NO se pierde: se reintenta en el próximo arr
 
 // --- contra el registro de verdad ------------------------------------------------------
 
-test('REAL: la procedencia de un paquete publicado del ecosistema se comprueba', async (t) => {
-  const gh = findGh()
-  try { execFileSync(gh, ['attestation', 'verify', '--help'], { stdio: 'ignore' }) } catch (_) { return t.skip('sin gh ≥ 2.49') }
+test('REAL: un paquete publicado del ecosistema cuadra con la release de su repo', async (t) => {
   try { const r = await fetch('https://registry.npmjs.org/-/package/@dotrino%2fupdate/dist-tags', { signal: AbortSignal.timeout(8000) }); if (!r.ok) throw new Error(String(r.status)) } catch (e) { return t.skip('sin red: ' + e.message) }
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'upd-real-'))
-  const ok = await verifyNpmPackage({ pkg: '@dotrino/update', version: '0.2.2', repo: 'imdotrino/dotrino-update', home, env: {} })
+  const ok = await verifyNpmPackage({ pkg: '@dotrino/update', version: '0.5.0', repo: 'imdotrino/dotrino-update', home, env: {} })
+  // La 0.5.0 es la primera que adjunta el archivo: mientras se publica todavía no está.
+  if (ok.code === 'NO_INTEGRITY_FILE') return t.skip('la release v0.5.0 todavía no existe')
   assert.equal(ok.ok, true, ok.reason)
-  assert.match(ok.commit, /^[0-9a-f]{40}$/)
+  assert.match(ok.integrity, /^sha512-/)
   fs.rmSync(ok.dir, { recursive: true })
-  // El mismo paquete, pero diciendo que salió de OTRO repo: no vale.
-  const otro = await verifyNpmPackage({ pkg: '@dotrino/update', version: '0.2.2', repo: 'imdotrino/dotrino-vault', home, env: {} })
-  assert.deepEqual([otro.ok, otro.code], [false, 'WRONG_SOURCE'])
+  // Una versión anterior a esto no trae el archivo: no se instala sola, y lo dice.
+  const vieja = await verifyNpmPackage({ pkg: '@dotrino/update', version: '0.4.0', repo: 'imdotrino/dotrino-update', home, env: {} })
+  assert.deepEqual([vieja.ok, vieja.code], [false, 'NO_INTEGRITY_FILE'])
 })

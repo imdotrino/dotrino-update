@@ -23,7 +23,7 @@ baja **se comprueba antes de tocar el disco**; si no se puede comprobar, no se i
 |---|---|---|
 | **Mirar** (`checkForUpdate`, `watchForUpdate`) | la pieza, sola, una vez al día | es una lectura |
 | **Traer un binario** (`fetchVerified`) | el producto | atestación de sigstore del release |
-| **Actualizarse por npm** (`./npm`) | la pieza, sola (decisión del dueño, 2026-10-08) | procedencia de npm firmada; y aprobación, si esa instancia la encendió |
+| **Actualizarse por npm** (`./npm`) | la pieza, sola (decisión del dueño, 2026-10-08) | el tarball de npm tiene que cuadrar con lo que midió la release de su repo; y aprobación, si esa instancia la encendió |
 
 ## Mirar
 
@@ -124,6 +124,9 @@ const stop = watchSelfUpdateNpm({
   onInstalled: async ({ version, restart }) => { if (restart) { await closeCleanly(); process.exit(0) } },
   // Una vez, al arrancar ya en la versión nueva, si la instancia no apagó `notify`.
   onUpdated: ({ version, from }) => tellTheVault({ product: pkg, version, from }),
+  // Hay versión nueva y el prefijo global es de root: una vez por versión, si `notify` está encendida.
+  // Se conecta con `reportUpdateNeedsRoot` de `@dotrino/vault/service` (≥ 0.82.0).
+  onNeedsRoot: ({ version, from }) => reportUpdateNeedsRoot({ product: pkg, version, from }),
   onResult: (r) => { lastUpdate = r },       // para la pantalla de estado
   log: (line) => console.log(line)
 })
@@ -167,6 +170,17 @@ tiene que esperar la respuesta (hasta un día) y devolver `false` al vencer, no 
 `updateStatusText` lo enseña: *«se pidió permiso para instalar la X el <fecha> y no se
 aprobó: no se vuelve a pedir · instálala con: npm i -g <pkg>@X»*.
 
+### Cuando hace falta root
+
+Si el prefijo global es de root, no se intenta nada: el resultado es `needs-root` y se llama a
+`onNeedsRoot({ version, from })` para que el daemon se lo diga a los aprobadores («hay
+actualización y necesita root»). **Una vez por versión** (se apunta en
+`update-needs-root.json`, así que un reinicio no lo repite; una versión más nueva vuelve a
+avisar), solo con `dir` y con `notify` encendida. Si `onNeedsRoot` lanza no queda como
+avisado y se reintenta en la próxima pasada. `updateStatusText` también lo dice: *«hay una X
+publicada y esta instalación necesita permisos de administrador para actualizarse:
+instálala a mano»*.
+
 ### Avisar de que se actualizó
 
 Al instalar, `selfUpdateNpm` deja en `dir` un marcador (`updated.json`: `{ from, to, at }`).
@@ -174,6 +188,9 @@ Al arrancar, si la versión que corre es la instalada, `onUpdated({ version, fro
 una vez y el marcador se borra; **si `onUpdated` lanza, el marcador se queda** y se reintenta
 en el próximo arranque. Con `notify` apagada no se llama. Para quien arme otro flujo:
 `takeUpdateMarker({ dir, current })` → `{ from, to }` (y lo borra) o `null`.
+
+**Lo preferido es instalar como usuario** (un Node de nvm, o un prefijo de npm del usuario:
+`npm config set prefix ~/.local`). Es lo único que se actualiza solo.
 
 **Qué se actualiza solo** (`installKind()`):
 
@@ -195,38 +212,101 @@ Nunca lanza.
 | `installed-restart` | sí | instalada, y `onInstalled` recibió `restart: true` |
 | `could-not-check` | no | no se pudo mirar — **no es «al día»** |
 | `not-self-updating` | no | no es una instalación global (`kind` dice cuál) |
-| `needs-root` | no | el prefijo global no es de este usuario; no se intentó |
+| `needs-root` | no | el prefijo global no es de este usuario; no se intentó, y se avisó (`onNeedsRoot`) |
 | `prefs-unreadable` | no | las preferencias de la instancia existen y no se pueden leer |
 | `asked-unreadable` | no | lo ya preguntado existe y no se puede leer (o no se pudo apuntar) |
 | `no-approver` | no | `approval` encendida y no se pasó `mayUpdate`: no hay a quién preguntar |
 | `could-not-ask` | no | `mayUpdate` lanzó: se reintenta en la próxima pasada (`why` trae su `code`) |
 | `not-approved` | no | `mayUpdate` no devolvió `true`; esa versión no se vuelve a preguntar |
 | `already-declined` | no | esa versión ya se preguntó y no se aprobó (`askedAt`) |
-| `unverified` | no | la procedencia no se pudo comprobar (`why` trae el motivo) |
+| `unverified` | no | no cuadra con la release de su repo, o no se pudo comprobar (`why` trae el motivo) |
 | `install-failed` | no | npm falló, o dijo que sí y dejó otra versión |
 
-**Qué garantiza la verificación** (`verifyNpmPackage({ pkg, version, repo, workflow? })`).
-Baja el tarball y la procedencia SLSA que npm guarda de esa versión, y `gh attestation
-verify` comprueba, sin sesión ni token, que la firma de sigstore es válida, que se emitió a
-una ejecución de `<repo>/.github/workflows/release.yml`, y que lo firmado es **ese** tarball
-(su sha512). Después se instala **ese mismo archivo**, no una segunda descarga.
+### La verificación: dos canales, sin firma
 
-**Qué no garantiza:**
+`verifyNpmPackage({ pkg, version, repo })` baja **el tarball de npm** y **su hash de la
+release de GitHub del repo** (`https://github.com/<repo>/releases/download/v<version>/npm-integrity.json`,
+que adjunta el `release.yml` al publicar). Calcula el sha512 de lo bajado y exige que sea el
+que dice GitHub, para ese paquete y esa versión. Después se instala **ese mismo archivo**
+(`--ignore-scripts`), no una segunda descarga. No necesita `gh` ni ninguna otra herramienta.
 
+→ `{ ok: true, file, dir, integrity }` (quien llama borra `dir`) o `{ ok: false, code, reason }`.
+
+**Qué garantiza:** lo que entrega npm es, byte a byte, lo que midió el workflow de release
+de ese repo. Para colar otro paquete hay que comprometer npm **y** la release de GitHub.
+
+**Qué no garantiza, sin adornos:**
+
+- **No hay firma.** Antes se comprobaba la procedencia de sigstore con `gh`; se quitó (dueño,
+  2026-10-08) para no exigir `gh` en cada máquina. La confianza es HTTPS hacia github.com más
+  el control de la release: quien pueda editar la release del repo puede cambiar el hash, y
+  no hay registro de transparencia que lo delate. La procedencia de npm se sigue publicando
+  (la genera el registro al publicar desde CI), pero **esto no la comprueba**.
 - Las **dependencias** del paquete: las resuelve npm al instalar, con su comprobación de
   integridad, no con esta.
-- Que el código del repo sea bueno: ata el paquete a su workflow, no audita lo que compiló.
-- Nada, si no hay con qué: sin `gh` ≥ 2.49 (`NO_GH`, `GH_TOO_OLD`), sin red
-  (`REGISTRY_UNREACHABLE`, `DOWNLOAD_FAILED`) o sin procedencia (`NO_ATTESTATION`) **no se
-  instala**. Los otros dos motivos son `WRONG_SOURCE` (salió de otro repo o workflow) y
-  `BAD_SIGNATURE`.
+- Que el código del repo sea bueno.
 
-Por eso **el paquete tiene que publicarse desde CI** con publicación de confianza: una
-versión subida a mano no trae procedencia y ninguna pieza la instalará sola. Y la máquina
-necesita `gh` (un binario de usuario en `~/.local/bin` basta, sin iniciar sesión).
+**Sin con qué comprobar no se instala.** Los motivos, por su `code` (llega como `why` en
+`unverified`):
 
-Se instala con `--ignore-scripts`. Las piezas sueltas (`installKind`, `verifyNpmPackage`,
-`installNpmGlobal`, `supervised`, `findNpm`, `takeUpdateMarker`) se exportan para quien arme otro flujo.
+| `code` | Qué pasó |
+|---|---|
+| `NO_INTEGRITY_FILE` | la release no trae el archivo (publicada antes de esto, o no existe) |
+| `INTEGRITY_UNREACHABLE` | GitHub no contestó, contestó un error, o el archivo no se puede leer |
+| `WRONG_PACKAGE` | el archivo no nombra ese paquete en esa versión |
+| `REGISTRY_UNREACHABLE` | npm no contestó, o señaló un tarball fuera del registro |
+| `DOWNLOAD_FAILED` | no se pudo bajar el tarball |
+| `INTEGRITY_MISMATCH` | lo que da npm no es lo que midió el release |
+
+Consecuencia: **una versión solo se instala sola si su release adjuntó `npm-integrity.json`**.
+Las anteriores a esto no lo traen.
+
+### El lado de CI: la receta del `release.yml`
+
+El archivo es `{ "v": 1, "packages": { "<nombre npm>": { "version": "<x.y.z>", "integrity": "sha512-<base64>" } } }`
+(un repo puede publicar varios paquetes), y lo genera este mismo paquete:
+
+```bash
+npx --yes @dotrino/update@latest integrity <archivo.tgz>... > npm-integrity.json
+```
+
+Lee el `package/package.json` de cada `.tgz` para el nombre y la versión, y calcula su sha512.
+En el workflow se empaqueta **una vez**, se mide **ese** archivo y se publica **ese** archivo,
+para que lo publicado sea byte a byte lo que se midió. Sin secretos nuevos: basta el
+`GITHUB_TOKEN` del propio workflow.
+
+```yaml
+permissions:
+  contents: write      # crear la release y adjuntarle el archivo
+  id-token: write      # la publicación de confianza de npm
+
+    steps:
+      # … checkout, setup-node, npm install, npm test, roadmap check …
+      - name: Empaquetar
+        run: npm pack
+      - name: Medir lo que se va a publicar
+        run: npx --yes @dotrino/update@latest integrity ./*.tgz > npm-integrity.json
+      - name: Publicar en npm ESE archivo
+        run: npm publish ./*.tgz --access public
+      - name: Adjuntar la medida a la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          gh release view "v$V" >/dev/null 2>&1 || gh release create "v$V" --generate-notes
+          gh release upload "v$V" npm-integrity.json --clobber
+```
+
+- **Varios paquetes en un repo:** un `npm pack` por paquete, todos los `.tgz` en el mismo
+  comando `integrity`, y un `npm publish <archivo>` por cada uno.
+- **Si el último paso falla** después de publicar, esa versión existe en npm sin su medida y
+  ninguna pieza la instalará sola (`NO_INTEGRITY_FILE`): se arregla volviendo a correr ese
+  paso, no publicando otra vez.
+- El tag tiene que ser `v<versión>`: de ahí sale la URL que consulta quien se actualiza.
+
+Las piezas sueltas (`installKind`, `verifyNpmPackage`, `installNpmGlobal`, `supervised`,
+`findNpm`, `takeUpdateMarker`) se exportan para quien arme otro flujo; `buildIntegrity`,
+`packageOfTarball` e `integrityOf` están en `@dotrino/update/integrity`.
 
 ## Instalar un binario
 

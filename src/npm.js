@@ -14,32 +14,37 @@
  * ────────────────────────────────────────────────────────────────────────────────────
  * QUÉ GARANTIZA LA VERIFICACIÓN (`verifyNpmPackage`), Y QUÉ NO
  *
- * Se baja el tarball de esa versión y la atestación de procedencia que npm guarda de ella
- * (SLSA v1, firmada con sigstore), y `gh attestation verify` comprueba, sin sesión ni token:
+ * DOS CANALES INDEPENDIENTES (decisión del dueño, 2026-10-08): el tarball se baja de npm, y
+ * su hash se baja de la release de GitHub del repo (`npm-integrity.json`, que adjunta el
+ * `release.yml` al publicar). Se calcula el sha512 de lo bajado y tiene que ser el que dice
+ * GitHub, para ESE paquete y ESA versión. Y lo que se instala es ese mismo archivo, no una
+ * segunda descarga.
  *
- *   · que la firma de sigstore es válida (certificado de Fulcio + registro de transparencia);
- *   · que el certificado se emitió a una ejecución de `<repo>/.github/workflows/<workflow>`;
- *   · que lo firmado es ESE tarball, byte a byte (su sha512).
+ * Qué garantiza: que lo que entrega el registro de npm es, byte a byte, lo que midió el
+ * workflow de release de ese repo. Para colar otro paquete hay que comprometer npm Y la
+ * release de GitHub a la vez.
  *
- * Y lo que se instala es ese mismo archivo ya comprobado, no una segunda descarga: entre
- * verificar e instalar no hay hueco por el que el registro pueda dar otra cosa.
- *
- * Lo que NO garantiza, y se dice: (1) las DEPENDENCIAS del paquete las resuelve npm al
- * instalar y solo llevan la comprobación de integridad de npm, no esta; (2) que el código
- * del repo sea bueno — ata el paquete a su workflow, no audita lo que el workflow compiló;
- * (3) sin `gh` ≥ 2.49, sin red o sin atestación no hay con qué comprobar, y entonces NO se
- * instala. «No se pudo verificar» nunca es «verificado».
+ * Lo que NO garantiza, y se dice sin adornos:
+ *   1. NO HAY FIRMA. Antes se comprobaba la procedencia de sigstore con `gh`; se quitó para
+ *      no exigir `gh` en cada máquina. La confianza es ahora HTTPS hacia github.com más el
+ *      control de la release: quien pueda editar la release del repo (o una cuenta con
+ *      permiso de escritura) puede cambiar el hash, y no queda registro de transparencia.
+ *   2. Las DEPENDENCIAS del paquete las resuelve npm al instalar: llevan la comprobación de
+ *      integridad de npm, no esta.
+ *   3. Que el código del repo sea bueno.
+ *   4. Sin el JSON (una release anterior a esto), sin red, o si no cuadra: NO se instala.
+ *      «No se pudo verificar» nunca es «verificado».
  */
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { latestVersion, isNewer, CHECK_EVERY_MS } from './index.js'
-import { findGh, ghReady } from './fetch.js'
+import { integrityOf, INTEGRITY_FILE } from './integrity.js'
 
 const REGISTRY = 'https://registry.npmjs.org'
-const SLSA = 'https://slsa.dev/provenance/v1'
+const GITHUB = 'https://github.com'
+const MAX_INTEGRITY_BYTES = 64 * 1024
 const RETRY_MS = 60 * 60_000
 const INSTALL_TIMEOUT_MS = 5 * 60_000
 
@@ -48,9 +53,6 @@ const real = (p) => { try { return fs.realpathSync(p) } catch (_) { return path.
 const inside = (child, parent) => child === parent || child.startsWith(parent + path.sep)
 /** `@dotrino/update` → `@dotrino%2fupdate`, que es como el registro nombra un paquete con scope. */
 const regName = (pkg) => pkg.replace('/', '%2f')
-/** El nombre con el que la atestación nombra su sujeto: `pkg:npm/%40dotrino/update@0.3.0`. */
-const purl = (pkg, version) => `pkg:npm/${pkg.replace(/^@/, '%40')}@${version}`
-
 /**
  * El `npm` DEL MISMO NODE QUE CORRE LA PIEZA. Con nvm o con un Node de usuario hay varios
  * prefijos globales en la máquina, y el `npm` del PATH de un servicio puede ser otro: se
@@ -144,83 +146,85 @@ async function getJson (url, { fetchImpl, timeoutMs = 20_000 }) {
 }
 
 /**
- * BAJA ESA VERSIÓN Y COMPRUEBA SU PROCEDENCIA. Ver la cabecera para lo que garantiza.
+ * El `npm-integrity.json` de la release `v<version>` de ese repo. Sigue la redirección de
+ * GitHub, con tope de tiempo y de tamaño (es un JSON de unas líneas: lo que pese más no es eso).
+ */
+async function fetchIntegrity ({ repo, version, fetchImpl, timeoutMs = 20_000 }) {
+  const url = `${GITHUB}/${repo}/releases/download/v${version}/${INTEGRITY_FILE}`
+  const ac = new AbortController()
+  const t = setTimeout(() => ac.abort(), timeoutMs)
+  try {
+    let r
+    try { r = await fetchImpl(url, { signal: ac.signal, redirect: 'follow', headers: { 'user-agent': 'dotrino-update' } }) } catch (e) {
+      return fail('INTEGRITY_UNREACHABLE', `could not reach the release of ${repo}: ${e.name === 'AbortError' ? 'timed out' : e.message}`)
+    }
+    if (r.status === 404) return fail('NO_INTEGRITY_FILE', `the release v${version} of ${repo} has no ${INTEGRITY_FILE} (it may predate this check, or the release does not exist)`)
+    if (!r.ok) return fail('INTEGRITY_UNREACHABLE', `GitHub answered ${r.status} for ${INTEGRITY_FILE} of ${repo} v${version}`)
+    let bytes
+    try { bytes = Buffer.from(await r.arrayBuffer()) } catch (e) {
+      return fail('INTEGRITY_UNREACHABLE', `could not read ${INTEGRITY_FILE}: ${e.name === 'AbortError' ? 'timed out' : e.message}`)
+    }
+    if (bytes.length > MAX_INTEGRITY_BYTES) return fail('INTEGRITY_UNREACHABLE', `${INTEGRITY_FILE} is ${bytes.length} bytes: that is not an integrity file`)
+    try {
+      const j = JSON.parse(bytes.toString('utf8'))
+      if (j?.v !== 1 || !j.packages || typeof j.packages !== 'object') throw new Error('unexpected shape')
+      return { ok: true, packages: j.packages }
+    } catch (e) { return fail('INTEGRITY_UNREACHABLE', `${INTEGRITY_FILE} of ${repo} v${version} cannot be read: ${e.message}`) }
+  } finally { clearTimeout(t) }
+}
+
+/**
+ * BAJA ESA VERSIÓN Y LA COMPRUEBA CONTRA LA RELEASE DE SU REPO. Ver la cabecera para lo que
+ * garantiza y lo que no.
  *
  * Con `ok: true` devuelve `file` (el tarball comprobado, que es lo que hay que instalar) y
  * `dir` (su carpeta, que BORRA quien llama cuando termine). Con `ok: false` no queda nada
  * en el disco.
  *
- * @param {{ pkg: string, version: string, repo: string, workflow?: string }} o
- *   `repo` como `imdotrino/dotrino-update`; `workflow` es el archivo, `release.yml` si no se dice.
- * @returns {Promise<{ ok: true, file: string, dir: string, commit: string|null } |
+ * @param {{ pkg: string, version: string, repo: string }} o   `repo` como `imdotrino/dotrino-update`
+ * @returns {Promise<{ ok: true, file: string, dir: string, integrity: string } |
  *                   { ok: false, code: string, reason: string }>}
- *   códigos: `BAD_ARGS`, `NO_GH`, `GH_TOO_OLD`, `REGISTRY_UNREACHABLE`, `NO_ATTESTATION`,
- *   `WRONG_SOURCE`, `DOWNLOAD_FAILED`, `BAD_SIGNATURE`.
+ *   códigos: `BAD_ARGS`, `NO_INTEGRITY_FILE` (la release no lo trae), `INTEGRITY_UNREACHABLE`,
+ *   `WRONG_PACKAGE` (el JSON no nombra ese paquete en esa versión), `REGISTRY_UNREACHABLE`,
+ *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release).
  */
-export async function verifyNpmPackage ({
-  pkg, version, repo, workflow = 'release.yml',
-  run = execFileSync, fetchImpl = fetch, gh = findGh(), home, env
-} = {}) {
+export async function verifyNpmPackage ({ pkg, version, repo, fetchImpl = fetch, home, env } = {}) {
   if (!pkg || !version || !repo) return fail('BAD_ARGS', 'verifyNpmPackage: `pkg`, `version` and `repo` are required')
-  const byHand = `npm view ${pkg}@${version} dist.attestations`
-  const noGh = ghReady({ run, gh, hint: byHand })
-  if (noGh) return noGh
 
-  // 1. Qué archivo es y qué dice el registro de dónde salió.
-  let tarball, bundles
+  // 1. Lo que midió el release, de GitHub.
+  const measured = await fetchIntegrity({ repo, version, fetchImpl })
+  if (!measured.ok) return measured
+  const want = Object.hasOwn(measured.packages, pkg) ? measured.packages[pkg] : null
+  if (!want || want.version !== version || typeof want.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]+=*$/.test(want.integrity)) {
+    return fail('WRONG_PACKAGE', `${INTEGRITY_FILE} of ${repo} v${version} does not name ${pkg}@${version}${want?.version ? ` (it names ${want.version})` : ''}`)
+  }
+
+  // 2. El archivo, de npm.
+  let tarball
   try {
     const meta = await getJson(`${REGISTRY}/${regName(pkg)}/${version}`, { fetchImpl })
     tarball = meta?.dist?.tarball
     if (typeof tarball !== 'string' || new URL(tarball).origin !== REGISTRY) throw new Error(`unexpected tarball location: ${tarball}`)
   } catch (e) { return fail('REGISTRY_UNREACHABLE', `could not read ${pkg}@${version} from the registry: ${e.message}`) }
-  try {
-    const att = await getJson(`${REGISTRY}/-/npm/v1/attestations/${regName(pkg)}@${version}`, { fetchImpl })
-    bundles = (att?.attestations || []).filter((a) => a?.predicateType === SLSA).map((a) => a.bundle).filter(Boolean)
-  } catch (e) { return fail('NO_ATTESTATION', `could not fetch the provenance of ${pkg}@${version}: ${e.message}`) }
-  if (!bundles.length) return fail('NO_ATTESTATION', `${pkg}@${version} was published without provenance: it did not come out of the release workflow of ${repo}`)
 
-  // 2. LO QUE DICE LA ATESTACIÓN, leído antes de verificar la firma. No decide nada —la
-  // firma la comprueba `gh` abajo, y es quien manda—: sirve para que el fallo diga QUÉ no
-  // cuadra («salió de otro repo») en vez de un «la firma no vale» que no explica nada.
-  let commit = null
-  const wanted = bundles.filter((b) => {
-    try {
-      const st = JSON.parse(Buffer.from(b.dsseEnvelope.payload, 'base64').toString('utf8'))
-      const wf = st?.predicate?.buildDefinition?.externalParameters?.workflow || {}
-      const hit = (st.subject || []).some((s) => s?.name === purl(pkg, version)) &&
-        wf.repository === `https://github.com/${repo}` && wf.path === `.github/workflows/${workflow}`
-      if (hit) commit = st.predicate.buildDefinition.resolvedDependencies?.[0]?.digest?.gitCommit || null
-      return hit
-    } catch (_) { return false }
-  })
-  if (!wanted.length) return fail('WRONG_SOURCE', `the provenance of ${pkg}@${version} does not name ${repo}/.github/workflows/${workflow}: it was built somewhere else`)
-
-  // 3. El archivo, y la firma contra ESE archivo.
   const dir = workDir({ home, env })
   try {
     const file = path.join(dir, path.basename(new URL(tarball).pathname))
+    let bytes
     try {
       const r = await fetchImpl(tarball, { redirect: 'follow', headers: { 'user-agent': 'dotrino-update' } })
       if (!r.ok) throw new Error(`the registry answered ${r.status}`)
-      fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()), { mode: 0o600 })
+      bytes = Buffer.from(await r.arrayBuffer())
     } catch (e) { rm(dir); return fail('DOWNLOAD_FAILED', `could not download ${pkg}@${version}: ${e.message}`) }
-    const bundleFile = path.join(dir, 'provenance.jsonl')
-    fs.writeFileSync(bundleFile, wanted.map((b) => JSON.stringify(b)).join('\n') + '\n')
-    try {
-      run(gh, [
-        'attestation', 'verify', file, '--bundle', bundleFile,
-        '--repo', repo, '--signer-workflow', `${repo}/.github/workflows/${workflow}`,
-        '--predicate-type', SLSA, '--digest-alg', 'sha512'
-      ], {
-        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-        // Sin sesión a propósito: si hubiera una, no se usa ni se necesita.
-        env: { ...process.env, GH_TOKEN: '', GITHUB_TOKEN: '' }
-      })
-    } catch (e) {
+
+    // 3. Tienen que ser lo mismo. Se mide lo que se bajó, y eso mismo es lo que se guarda.
+    const got = integrityOf(bytes)
+    if (got !== want.integrity) {
       rm(dir)
-      return fail('BAD_SIGNATURE', `the provenance of ${pkg}@${version} does not check out against the downloaded file: ${String(e.stderr || e.message).trim().slice(0, 300)}`)
+      return fail('INTEGRITY_MISMATCH', `what the registry serves as ${pkg}@${version} is not what the release of ${repo} measured (${got.slice(0, 24)}… vs ${want.integrity.slice(0, 24)}…)`)
     }
-    return { ok: true, file, dir, commit, sha512: crypto.createHash('sha512').update(fs.readFileSync(file)).digest('hex') }
+    fs.writeFileSync(file, bytes, { mode: 0o600 })
+    return { ok: true, file, dir, integrity: got }
   } catch (e) { rm(dir); throw e }
 }
 
@@ -392,32 +396,86 @@ function readAsked (dir) {
 }
 const dropAsked = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_ASKED_FILE), { force: true }) } catch (_) {} }
 
+// --- HACE FALTA ROOT: SE AVISA, NO SE INTENTA ---------------------------------------------
+//
+// Dueño (2026-10-08): «si se requiere root por algún motivo, simplemente se notifica al
+// aprobador que hay actualización y necesita root». Una vez por versión, y se apunta para
+// que un reinicio no lo repita.
+
+export const UPDATE_NEEDS_ROOT_FILE = 'update-needs-root.json'
+
+/** `{ version, at, notified }` o `null`. Ilegible → lanza (`needs-root-unreadable`). */
+function readNeedsRoot (dir) {
+  const file = path.join(dir, UPDATE_NEEDS_ROOT_FILE)
+  if (!fs.existsSync(file)) return null
+  try {
+    const n = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (typeof n?.version !== 'string' || typeof n?.notified !== 'boolean') throw new Error('it does not say which version')
+    return n
+  } catch (e) { throw thrown('needs-root-unreadable', `${UPDATE_NEEDS_ROOT_FILE} exists but cannot be read: ${e.message}`) }
+}
+const dropNeedsRoot = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_NEEDS_ROOT_FILE), { force: true }) } catch (_) {} }
+
+/**
+ * Apunta que esa versión necesita root y, si toca, avisa. «Toca» es: hay `onNeedsRoot`, la
+ * instancia no apagó `notify`, y de esa versión (o de una posterior) todavía no se avisó. Si
+ * el aviso lanza NO queda como avisado: se reintenta en la próxima pasada. Nunca lanza.
+ */
+async function noteNeedsRoot ({ dir, pkg, version, from, onNeedsRoot, log, now }) {
+  if (!dir) return
+  try {
+    const prev = readNeedsRoot(dir)
+    const same = prev && !isNewer(version, prev.version)
+    let notified = same ? prev.notified : false
+    if (!notified && onNeedsRoot && readUpdatePrefs(dir).notify) {
+      try { await onNeedsRoot({ version, from }); notified = true } catch (e) {
+        log(`[update] could not tell that ${pkg} ${version} needs root to install (${e?.message || e}) · it will try again on the next check`)
+      }
+    }
+    if (!same || notified !== prev.notified) writeJson(path.join(dir, UPDATE_NEEDS_ROOT_FILE), { v: 1, pkg, version, at: same ? prev.at : now(), notified })
+  } catch (e) {
+    log(`[update] could not note that ${pkg} ${version} needs root (${e?.message || e})`)
+  }
+}
+
 const STATUS_TEXT = {
   es: {
     declined: (v, d, pkg) => `se pidió permiso para instalar la ${v} el ${d} y no se aprobó: no se vuelve a pedir · instálala con: npm i -g ${pkg}@${v}`,
     waiting: (v, d) => `se pidió permiso para instalar la ${v} el ${d} y espera tu respuesta (vale un día)`,
-    unreadable: (m) => `no se pudo leer si se pidió permiso para actualizar (${m})`
+    unreadable: (m) => `no se pudo leer si se pidió permiso para actualizar (${m})`,
+    needsRoot: (v, pkg) => `hay una ${v} publicada y esta instalación necesita permisos de administrador para actualizarse: instálala a mano (sudo npm i -g ${pkg}@${v})`
   },
   en: {
     declined: (v, d, pkg) => `approval to install ${v} was asked on ${d} and not given: it will not ask again · install it with: npm i -g ${pkg}@${v}`,
     waiting: (v, d) => `approval to install ${v} was asked on ${d} and is waiting for your answer (good for a day)`,
-    unreadable: (m) => `whether approval to update was asked could not be read (${m})`
+    unreadable: (m) => `whether approval to update was asked could not be read (${m})`,
+    needsRoot: (v, pkg) => `${v} is out and this install needs administrator rights to update: install it by hand (sudo npm i -g ${pkg}@${v})`
   }
 }
 
 /**
- * UNA LÍNEA PARA EL `info`/ESTADO DE CADA AGENTE: si se pidió permiso para una versión más
- * nueva que la que corre y no se dio, lo dice, con cómo instalarla a mano. Cadena vacía si
- * no hay nada que decir. No lanza: si el apunte no se puede leer, eso es lo que dice.
+ * LO QUE EL `info`/ESTADO DE CADA AGENTE TIENE QUE DECIR de una versión más nueva que la que
+ * corre y que no se instaló sola: que se pidió permiso y no se dio, o que la instalación
+ * necesita root. Con cómo instalarla a mano. Cadena vacía si no hay nada que decir. No
+ * lanza: si un apunte no se puede leer, eso es lo que dice.
  * @returns {string}
  */
 export function updateStatusText ({ dir, current, lang = 'es', now = Date.now } = {}) {
   const T = STATUS_TEXT[lang] || STATUS_TEXT.es
-  let a
-  try { a = dir ? readAsked(dir) : null } catch (e) { return T.unreadable(e.message) }
-  if (!a || a.result === 'approved' || !isNewer(a.version, current)) return ''
-  const day = new Date(a.askedAt).toISOString().slice(0, 10)
-  return a.result === 'pending' && now() - a.askedAt < ASK_TTL_MS ? T.waiting(a.version, day) : T.declined(a.version, day, a.pkg || '<pkg>')
+  if (!dir) return ''
+  const lines = []
+  try {
+    const n = readNeedsRoot(dir)
+    if (n && isNewer(n.version, current)) lines.push(T.needsRoot(n.version, n.pkg || '<pkg>'))
+  } catch (e) { lines.push(T.unreadable(e.message)) }
+  try {
+    const a = readAsked(dir)
+    if (a && a.result !== 'approved' && isNewer(a.version, current)) {
+      const day = new Date(a.askedAt).toISOString().slice(0, 10)
+      lines.push(a.result === 'pending' && now() - a.askedAt < ASK_TTL_MS ? T.waiting(a.version, day) : T.declined(a.version, day, a.pkg || '<pkg>'))
+    }
+  } catch (e) { lines.push(T.unreadable(e.message)) }
+  return lines.join('\n')
 }
 
 const PREFS_TEXT = {
@@ -486,6 +544,11 @@ export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
  *
  * Sin `dir` no hay preferencias: entonces se pregunta si, y solo si, se pasó `mayUpdate`.
  *
+ * `onNeedsRoot({ version, from })` se llama cuando hay versión nueva y el prefijo global no
+ * es de este usuario (`needs-root`): UNA vez por versión, solo con `dir` y con `notify`
+ * encendida. Es donde el daemon se lo dice a los aprobadores. Si lanza, se reintenta en la
+ * próxima pasada. No se intenta instalar nada.
+ *
  * `dir` es la carpeta de datos de la instancia: de ahí salen las preferencias, y ahí queda el marcador `{ from, to, at }` que
  * la versión nueva lee al arrancar para avisar de que se actualizó (`takeUpdateMarker`).
  *
@@ -500,9 +563,9 @@ export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
  * `verifyNpmPackage`) e `install-failed`.
  */
 export async function selfUpdateNpm ({
-  pkg, current, repo, workflow = 'release.yml', mayUpdate = null, onInstalled = null,
+  pkg, current, repo, mayUpdate = null, onInstalled = null, onNeedsRoot = null,
   log = () => {}, dir = null, entry = process.argv[1], run = execFileSync, fetchImpl = fetch,
-  env = process.env, npm = findNpm(), gh = findGh(), home, platform, access, readFile, now = Date.now
+  env = process.env, npm = findNpm(), home, platform, access, readFile, now = Date.now
 } = {}) {
   if (!pkg || !repo) return fail('could-not-check', 'selfUpdateNpm: `pkg` and `repo` are required')
   // `isNewer` da false si `current` no es una versión, y eso se leería como «al día».
@@ -522,6 +585,7 @@ export async function selfUpdateNpm ({
   if (!globalWritable(kind, { platform, access })) {
     const reason = needsRoot(pkg, version, kind.prefix)
     log(`[update] ${pkg} ${version} is out (this one is ${current}) · ${reason}`)
+    await noteNeedsRoot({ dir, pkg, version, from: current, onNeedsRoot, log, now })
     return out('needs-root', reason)
   }
 
@@ -566,7 +630,7 @@ export async function selfUpdateNpm ({
       try { yes = await mayUpdate({ pkg, version, from: current }) } catch (e) {
         // NO SE PUDO PREGUNTAR (la bóveda no contesta, no hay red): eso no es una negativa.
         // No queda apuntado nada y se reintenta en la próxima pasada.
-        if (dir) dropAsked(dir)
+        if (dir) { dropAsked(dir); dropNeedsRoot(dir) }
         log(`[update] ${pkg} ${version} is out (this one is ${current}) · could not ask whether it may update (${e?.message || e}) · not updating, it will ask on the next check`)
         return out('could-not-ask', e?.message || String(e), e?.code ? { why: e.code } : {})
       }
@@ -580,7 +644,7 @@ export async function selfUpdateNpm ({
     }
   }
 
-  const v = await verifyNpmPackage({ pkg, version, repo, workflow, run, fetchImpl, gh, home, env })
+  const v = await verifyNpmPackage({ pkg, version, repo, fetchImpl, home, env })
   if (!v.ok) {
     log(`[update] ${pkg} ${version} NOT installed: ${v.reason}`)
     return out('unverified', v.reason, { why: v.code })
@@ -598,11 +662,11 @@ export async function selfUpdateNpm ({
       log(`[update] could not leave the update marker in ${dir}: ${e.message}`)
     }
   }
-  if (dir) dropAsked(dir)
+  if (dir) { dropAsked(dir); dropNeedsRoot(dir) }
   const restart = supervised({ env })
   log(restart
-    ? `[update] ${pkg} ${version} installed (verified against its provenance) · restarting now to run it`
-    : `[update] ${pkg} ${version} installed (verified against its provenance) · restart it to run the new version`)
+    ? `[update] ${pkg} ${version} installed (checked against the release of its repo) · restarting now to run it`
+    : `[update] ${pkg} ${version} installed (checked against the release of its repo) · restart it to run the new version`)
   try { await onInstalled?.({ version, from: current, restart }) } catch (e) { log(`[update] onInstalled failed: ${e?.message || e}`) }
   return { ok: true, code: restart ? 'installed-restart' : 'installed', version, from: current }
 }
