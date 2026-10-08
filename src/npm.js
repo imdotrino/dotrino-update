@@ -45,6 +45,7 @@ import { integrityOf, INTEGRITY_FILE } from './integrity.js'
 const REGISTRY = 'https://registry.npmjs.org'
 const GITHUB = 'https://github.com'
 const MAX_INTEGRITY_BYTES = 64 * 1024
+const DEFAULT_TAG = (version) => `v${version}`
 const RETRY_MS = 60 * 60_000
 const INSTALL_TIMEOUT_MS = 5 * 60_000
 
@@ -149,8 +150,8 @@ async function getJson (url, { fetchImpl, timeoutMs = 20_000 }) {
  * El `npm-integrity.json` de la release `v<version>` de ese repo. Sigue la redirección de
  * GitHub, con tope de tiempo y de tamaño (es un JSON de unas líneas: lo que pese más no es eso).
  */
-async function fetchIntegrity ({ repo, version, fetchImpl, timeoutMs = 20_000 }) {
-  const url = `${GITHUB}/${repo}/releases/download/v${version}/${INTEGRITY_FILE}`
+async function fetchIntegrity ({ repo, version, tagName, fetchImpl, timeoutMs = 20_000 }) {
+  const url = `${GITHUB}/${repo}/releases/download/${encodeURIComponent(tagName)}/${INTEGRITY_FILE}`
   const ac = new AbortController()
   const t = setTimeout(() => ac.abort(), timeoutMs)
   try {
@@ -158,8 +159,8 @@ async function fetchIntegrity ({ repo, version, fetchImpl, timeoutMs = 20_000 })
     try { r = await fetchImpl(url, { signal: ac.signal, redirect: 'follow', headers: { 'user-agent': 'dotrino-update' } }) } catch (e) {
       return fail('INTEGRITY_UNREACHABLE', `could not reach the release of ${repo}: ${e.name === 'AbortError' ? 'timed out' : e.message}`)
     }
-    if (r.status === 404) return fail('NO_INTEGRITY_FILE', `the release v${version} of ${repo} has no ${INTEGRITY_FILE} (it may predate this check, or the release does not exist)`)
-    if (!r.ok) return fail('INTEGRITY_UNREACHABLE', `GitHub answered ${r.status} for ${INTEGRITY_FILE} of ${repo} v${version}`)
+    if (r.status === 404) return fail('NO_INTEGRITY_FILE', `the release ${tagName} of ${repo} has no ${INTEGRITY_FILE} (it may predate this check, or the release does not exist)`)
+    if (!r.ok) return fail('INTEGRITY_UNREACHABLE', `GitHub answered ${r.status} for ${INTEGRITY_FILE} of ${repo} ${tagName}`)
     let bytes
     try { bytes = Buffer.from(await r.arrayBuffer()) } catch (e) {
       return fail('INTEGRITY_UNREACHABLE', `could not read ${INTEGRITY_FILE}: ${e.name === 'AbortError' ? 'timed out' : e.message}`)
@@ -169,7 +170,7 @@ async function fetchIntegrity ({ repo, version, fetchImpl, timeoutMs = 20_000 })
       const j = JSON.parse(bytes.toString('utf8'))
       if (j?.v !== 1 || !j.packages || typeof j.packages !== 'object') throw new Error('unexpected shape')
       return { ok: true, packages: j.packages }
-    } catch (e) { return fail('INTEGRITY_UNREACHABLE', `${INTEGRITY_FILE} of ${repo} v${version} cannot be read: ${e.message}`) }
+    } catch (e) { return fail('INTEGRITY_UNREACHABLE', `${INTEGRITY_FILE} of ${repo} ${tagName} cannot be read: ${e.message}`) }
   } finally { clearTimeout(t) }
 }
 
@@ -181,22 +182,31 @@ async function fetchIntegrity ({ repo, version, fetchImpl, timeoutMs = 20_000 })
  * `dir` (su carpeta, que BORRA quien llama cuando termine). Con `ok: false` no queda nada
  * en el disco.
  *
- * @param {{ pkg: string, version: string, repo: string }} o   `repo` como `imdotrino/dotrino-update`
+ * @param {{ pkg: string, version: string, repo: string, tag?: (version: string) => string }} o
+ *   `repo` como `imdotrino/dotrino-update`; `tag` da el tag de la release de una versión
+ *   (por defecto `v<versión>`).
  * @returns {Promise<{ ok: true, file: string, dir: string, integrity: string } |
  *                   { ok: false, code: string, reason: string }>}
  *   códigos: `BAD_ARGS`, `NO_INTEGRITY_FILE` (la release no lo trae), `INTEGRITY_UNREACHABLE`,
  *   `WRONG_PACKAGE` (el JSON no nombra ese paquete en esa versión), `REGISTRY_UNREACHABLE`,
  *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release).
  */
-export async function verifyNpmPackage ({ pkg, version, repo, fetchImpl = fetch, home, env } = {}) {
+export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG, fetchImpl = fetch, home, env } = {}) {
   if (!pkg || !version || !repo) return fail('BAD_ARGS', 'verifyNpmPackage: `pkg`, `version` and `repo` are required')
+  // CÓMO SE LLAMA LA RELEASE DE ESA VERSIÓN. Casi siempre `v<versión>`; un repo que publica
+  // un paquete junto a otra cosa usa otro prefijo (`agent-v<versión>`), y lo dice quien llama.
+  let tagName
+  try { tagName = typeof tag === 'function' ? tag(version) : null } catch (_) { tagName = null }
+  if (typeof tagName !== 'string' || !tagName || /[\s/]/.test(tagName)) {
+    return fail('BAD_ARGS', 'verifyNpmPackage: `tag` must be a function that returns the release tag of a version (a non-empty string without `/` or spaces)')
+  }
 
   // 1. Lo que midió el release, de GitHub.
-  const measured = await fetchIntegrity({ repo, version, fetchImpl })
+  const measured = await fetchIntegrity({ repo, version, tagName, fetchImpl })
   if (!measured.ok) return measured
   const want = Object.hasOwn(measured.packages, pkg) ? measured.packages[pkg] : null
   if (!want || want.version !== version || typeof want.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]+=*$/.test(want.integrity)) {
-    return fail('WRONG_PACKAGE', `${INTEGRITY_FILE} of ${repo} v${version} does not name ${pkg}@${version}${want?.version ? ` (it names ${want.version})` : ''}`)
+    return fail('WRONG_PACKAGE', `${INTEGRITY_FILE} of ${repo} ${tagName} does not name ${pkg}@${version}${want?.version ? ` (it names ${want.version})` : ''}`)
   }
 
   // 2. El archivo, de npm.
@@ -563,7 +573,7 @@ export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
  * `verifyNpmPackage`) e `install-failed`.
  */
 export async function selfUpdateNpm ({
-  pkg, current, repo, mayUpdate = null, onInstalled = null, onNeedsRoot = null,
+  pkg, current, repo, tag = DEFAULT_TAG, mayUpdate = null, onInstalled = null, onNeedsRoot = null,
   log = () => {}, dir = null, entry = process.argv[1], run = execFileSync, fetchImpl = fetch,
   env = process.env, npm = findNpm(), home, platform, access, readFile, now = Date.now
 } = {}) {
@@ -644,7 +654,7 @@ export async function selfUpdateNpm ({
     }
   }
 
-  const v = await verifyNpmPackage({ pkg, version, repo, fetchImpl, home, env })
+  const v = await verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env })
   if (!v.ok) {
     log(`[update] ${pkg} ${version} NOT installed: ${v.reason}`)
     return out('unverified', v.reason, { why: v.code })

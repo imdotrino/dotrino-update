@@ -191,6 +191,38 @@ test('verificar: el registro no contesta, señala un tarball fuera del registro,
   assert.equal((await verifyNpmPackage({ pkg: PKG })).code, 'BAD_ARGS')
 })
 
+test('el tag de la release lo dice quien llama: `agent-v<versión>` en un repo que publica dos cosas', async () => {
+  const m = mundo()
+  const pedidas = []
+  const fetchImpl = async (u) => {
+    pedidas.push(u)
+    return u.includes('/releases/download/') ? m.opts.fetchImpl(u.replace('/agent-v1.1.0/', '/v1.1.0/')) : m.opts.fetchImpl(u)
+  }
+  const tag = (v) => 'agent-v' + v
+  const v = await verifyNpmPackage({ ...m.opts, version: '1.1.0', fetchImpl, tag })
+  assert.equal(v.ok, true, v.reason)
+  assert.ok(pedidas.includes(`https://github.com/${REPO}/releases/download/agent-v1.1.0/npm-integrity.json`))
+  fs.rmSync(v.dir, { recursive: true })
+  // Y llega hasta ahí desde el flujo entero.
+  const n = mundo(); const vistas = []
+  const r = await selfUpdateNpm({ ...n.opts, tag, fetchImpl: async (u) => { vistas.push(u); return n.opts.fetchImpl(u.replace('/agent-v1.1.0/', '/v1.1.0/')) } })
+  assert.equal(r.code, 'installed')
+  assert.ok(vistas.some((u) => u.includes('/agent-v1.1.0/')))
+  // Sin decirlo, sigue siendo `v<versión>`; y con el tag equivocado la release no lo trae.
+  const mal = await verifyNpmPackage({ ...m.opts, version: '1.1.0', tag: (x) => 'otro-v' + x })
+  assert.equal(mal.code, 'NO_INTEGRITY_FILE')
+  assert.match(mal.reason, /the release otro-v1\.1\.0 of/)
+})
+
+test('un `tag` que no da un tag no se usa: BAD_ARGS, y no se baja nada', async () => {
+  for (const tag of ['agent-v', () => '', () => 'a/b', () => 'con espacio', () => 7, () => { throw new Error('x') }, null]) {
+    const m = mundo()
+    const v = await verifyNpmPackage({ ...m.opts, version: '1.1.0', tag })
+    assert.deepEqual([v.ok, v.code], [false, 'BAD_ARGS'], String(tag))
+    assert.deepEqual(m.fetched, [])
+  }
+})
+
 // --- el lado de CI: medir lo que se va a publicar ----------------------------------------
 
 /** Un `.tgz` mínimo como los de `npm pack`: una cabecera de tar y el package.json. */
@@ -692,6 +724,10 @@ test('REAL: un paquete publicado del ecosistema cuadra con la release de su repo
   assert.equal(ok.ok, true, ok.reason)
   assert.match(ok.integrity, /^sha512-/)
   fs.rmSync(ok.dir, { recursive: true })
+  // Un paquete que comparte repo con otra cosa y publica con otro tag.
+  const agente = await verifyNpmPackage({ pkg: '@dotrino/terminal-agent', version: '0.30.0', repo: 'imdotrino/dotrino-terminal', tag: (v) => 'agent-v' + v, home, env: {} })
+  assert.equal(agente.ok, true, agente.reason)
+  fs.rmSync(agente.dir, { recursive: true })
   // Una versión anterior a esto no trae el archivo: no se instala sola, y lo dice.
   const vieja = await verifyNpmPackage({ pkg: '@dotrino/update', version: '0.4.0', repo: 'imdotrino/dotrino-update', home, env: {} })
   assert.deepEqual([vieja.ok, vieja.code], [false, 'NO_INTEGRITY_FILE'])

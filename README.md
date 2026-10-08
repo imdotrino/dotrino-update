@@ -117,6 +117,7 @@ const stop = watchSelfUpdateNpm({
   pkg: '@dotrino/terminal-agent',            // el paquete que corre
   current: VERSION,                          // su versión, la que está en marcha
   repo: 'imdotrino/dotrino-terminal',        // de dónde tiene que haber salido
+  tag: (v) => 'agent-v' + v,                 // solo si la release no se llama `v<versión>`
   dir: instanceDir,                          // carpeta de datos de ESTA instancia
   // Solo se llama si la instancia encendió `approval`. true = sí · false = no o venció · lanza = no pude preguntar.
   mayUpdate: ({ pkg, version, from }) => askTheVault({ product: pkg, version, from }),
@@ -224,9 +225,12 @@ Nunca lanza.
 
 ### La verificación: dos canales, sin firma
 
-`verifyNpmPackage({ pkg, version, repo })` baja **el tarball de npm** y **su hash de la
-release de GitHub del repo** (`https://github.com/<repo>/releases/download/v<version>/npm-integrity.json`,
-que adjunta el `release.yml` al publicar). Calcula el sha512 de lo bajado y exige que sea el
+`verifyNpmPackage({ pkg, version, repo, tag? })` baja **el tarball de npm** y **su hash de la
+release de GitHub del repo** (`https://github.com/<repo>/releases/download/<tag>/npm-integrity.json`,
+que adjunta el `release.yml` al publicar). `tag` es una función `(version) => string` que da el
+tag de la release de una versión; por defecto `v<versión>`. Un repo que publica su paquete junto
+a otra cosa usa otro (`tag: (v) => 'agent-v' + v`), y se pasa igual a `selfUpdateNpm` y a
+`watchSelfUpdateNpm`. Un `tag` que no devuelve un texto sin `/` ni espacios es `BAD_ARGS`. Calcula el sha512 de lo bajado y exige que sea el
 que dice GitHub, para ese paquete y esa versión. Después se instala **ese mismo archivo**
 (`--ignore-scripts`), no una segunda descarga. No necesita `gh` ni ninguna otra herramienta.
 
@@ -302,7 +306,8 @@ permissions:
 - **Si el último paso falla** después de publicar, esa versión existe en npm sin su medida y
   ninguna pieza la instalará sola (`NO_INTEGRITY_FILE`): se arregla volviendo a correr ese
   paso, no publicando otra vez.
-- El tag tiene que ser `v<versión>`: de ahí sale la URL que consulta quien se actualiza.
+- El tag es `v<versión>` salvo que el daemon pase otro en `tag`: de ahí sale la URL que consulta
+  quien se actualiza, así que los dos lados tienen que decir el mismo.
 
 Las piezas sueltas (`installKind`, `verifyNpmPackage`, `installNpmGlobal`, `supervised`,
 `findNpm`, `takeUpdateMarker`) se exportan para quien arme otro flujo; `buildIntegrity`,
