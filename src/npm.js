@@ -271,14 +271,223 @@ export function installNpmGlobal ({
   return { ok: true, version: got }
 }
 
+// --- AVISAR DE QUE SE ACTUALIZÓ --------------------------------------------------------
+//
+// Cuando una pieza se actualiza sola, se lo dice a los aprobadores de su bóveda (dueño,
+// 2026-10-08), y ese aviso se puede apagar EN CADA PIEZA. Aquí van las dos mitades que no
+// dependen de la bóveda: la preferencia y el marcador de «me acabo de actualizar». Hablar
+// con la bóveda es de quien llama (`onUpdated`).
+
+export const UPDATE_PREFS_FILE = 'update-prefs.json'
+export const UPDATE_MARKER_FILE = 'updated.json'
+
+const thrown = (code, message) => Object.assign(new Error(message), { code })
+const writeJson = (file, obj) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(obj) + '\n', { mode: 0o600 })
+  fs.renameSync(tmp, file)
+}
+
+const PREF_DEFAULTS = { approval: false, notify: true }
+
+/**
+ * LAS PREFERENCIAS DE ACTUALIZACIÓN DE ESTA INSTANCIA, que son dos y son de cada agente
+ * (dueño, 2026-10-08: «lo de pedir aprobación es por agente, igual que las notificaciones;
+ * son independientes al del vault»):
+ *
+ *   · `approval` — pedir aprobación antes de actualizarse. Por defecto NO: se actualiza sola.
+ *   · `notify`   — avisar cuando se actualizó. Por defecto SÍ.
+ *
+ * Sin archivo valen los valores por defecto. Un archivo que existe y no se puede leer NO es
+ * «los valores por defecto» —el de `approval` es no preguntar, y suponerlo saltaría la
+ * aprobación que el dueño encendió—: se lanza (`prefs-unreadable`). No es secreto: va en claro.
+ * @returns {{ approval: boolean, notify: boolean }}
+ */
+export function readUpdatePrefs (dir) {
+  if (!dir) throw thrown('bad-dir', 'readUpdatePrefs: a data directory is required')
+  const file = path.join(dir, UPDATE_PREFS_FILE)
+  if (!fs.existsSync(file)) return { ...PREF_DEFAULTS }
+  let raw
+  try { raw = JSON.parse(fs.readFileSync(file, 'utf8')) } catch (e) {
+    throw thrown('prefs-unreadable', `${UPDATE_PREFS_FILE} exists but cannot be read: ${e.message}`)
+  }
+  if (!raw || typeof raw.approval !== 'boolean' || typeof raw.notify !== 'boolean') {
+    throw thrown('prefs-unreadable', `${UPDATE_PREFS_FILE} exists but does not say both \`approval\` and \`notify\``)
+  }
+  return { approval: raw.approval, notify: raw.notify }
+}
+
+/** Cambia SOLO lo que se le pasa (`{ approval }`, `{ notify }` o las dos); lo demás queda como estaba. */
+export function writeUpdatePrefs (dir, change = {}) {
+  if (!dir) throw thrown('bad-dir', 'writeUpdatePrefs: a data directory is required')
+  const keys = Object.keys(change).filter((k) => change[k] !== undefined)
+  if (!keys.length || keys.some((k) => !(k in PREF_DEFAULTS) || typeof change[k] !== 'boolean')) {
+    throw thrown('bad-pref', 'writeUpdatePrefs: pass `approval` and/or `notify`, each true or false')
+  }
+  const next = { ...readUpdatePrefs(dir) }
+  for (const k of keys) next[k] = change[k]
+  writeJson(path.join(dir, UPDATE_PREFS_FILE), { v: 1, ...next })
+  return next
+}
+
+/** El marcador tal cual, o `null` si no hay. Ilegible → lanza (`marker-unreadable`). */
+function readMarker (dir) {
+  const file = path.join(dir, UPDATE_MARKER_FILE)
+  if (!fs.existsSync(file)) return null
+  try {
+    const m = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (typeof m?.to !== 'string' || typeof m?.from !== 'string') throw new Error('it does not name the versions')
+    return m
+  } catch (e) { throw thrown('marker-unreadable', `${UPDATE_MARKER_FILE} exists but cannot be read: ${e.message}`) }
+}
+const dropMarker = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_MARKER_FILE), { force: true }) } catch (_) {} }
+
+/**
+ * ¿ME ACABO DE ACTUALIZAR? Lo dice el marcador que `selfUpdateNpm` deja al instalar, y solo
+ * cuenta si la versión que corre (`current`) ES la que se instaló: así el aviso lo da la
+ * versión nueva ya en marcha, que es la prueba de que ocurrió.
+ *
+ * Devuelve `{ from, to }` y BORRA el marcador; `null` si no hay, o si todavía corre la
+ * vieja (el marcador se queda para el próximo arranque). Uno de una versión anterior a la
+ * que corre ya no dice nada y se borra. Ilegible → lanza (`marker-unreadable`).
+ * @returns {{ from: string, to: string } | null}
+ */
+export function takeUpdateMarker ({ dir, current } = {}) {
+  const m = peekUpdateMarker({ dir, current })
+  if (m) dropMarker(dir)
+  return m
+}
+
+/** Lo mismo que `takeUpdateMarker` pero SIN borrarlo: para avisar primero y borrar si salió. */
+function peekUpdateMarker ({ dir, current } = {}) {
+  if (!dir) throw thrown('bad-dir', 'takeUpdateMarker: a data directory is required')
+  const m = readMarker(dir)
+  if (!m) return null
+  if (m.to === current) return { from: m.from, to: m.to }
+  if (isNewer(current, m.to)) dropMarker(dir)   // ya va por delante: ese aviso caducó
+  return null
+}
+
+// --- EL PERMISO SE PIDE UNA VEZ POR VERSIÓN -----------------------------------------------
+//
+// Regla del dueño (2026-10-08): el permiso «dura un día, pero se hace una sola vez; no se
+// reintenta al siguiente día; se asume negado si no se hizo en 24 horas; se dispara
+// nuevamente en la siguiente actualización». Así que lo preguntado SE APUNTA, al pedir y
+// no al contestar: un reinicio con el pedido a medias cuenta como ya preguntado.
+
+export const UPDATE_ASKED_FILE = 'update-asked.json'
+/** Cuánto vale un pedido sin respuesta antes de darse por negado. */
+export const ASK_TTL_MS = 24 * 60 * 60_000
+
+/** Lo último que se preguntó, o `null`. Ilegible → lanza (`asked-unreadable`). */
+function readAsked (dir) {
+  const file = path.join(dir, UPDATE_ASKED_FILE)
+  if (!fs.existsSync(file)) return null
+  try {
+    const a = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (typeof a?.version !== 'string' || typeof a?.askedAt !== 'number' || !['pending', 'denied', 'approved'].includes(a.result)) throw new Error('it does not say what was asked')
+    return a
+  } catch (e) { throw thrown('asked-unreadable', `${UPDATE_ASKED_FILE} exists but cannot be read: ${e.message}`) }
+}
+const dropAsked = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_ASKED_FILE), { force: true }) } catch (_) {} }
+
+const STATUS_TEXT = {
+  es: {
+    declined: (v, d, pkg) => `se pidió permiso para instalar la ${v} el ${d} y no se aprobó: no se vuelve a pedir · instálala con: npm i -g ${pkg}@${v}`,
+    waiting: (v, d) => `se pidió permiso para instalar la ${v} el ${d} y espera tu respuesta (vale un día)`,
+    unreadable: (m) => `no se pudo leer si se pidió permiso para actualizar (${m})`
+  },
+  en: {
+    declined: (v, d, pkg) => `approval to install ${v} was asked on ${d} and not given: it will not ask again · install it with: npm i -g ${pkg}@${v}`,
+    waiting: (v, d) => `approval to install ${v} was asked on ${d} and is waiting for your answer (good for a day)`,
+    unreadable: (m) => `whether approval to update was asked could not be read (${m})`
+  }
+}
+
+/**
+ * UNA LÍNEA PARA EL `info`/ESTADO DE CADA AGENTE: si se pidió permiso para una versión más
+ * nueva que la que corre y no se dio, lo dice, con cómo instalarla a mano. Cadena vacía si
+ * no hay nada que decir. No lanza: si el apunte no se puede leer, eso es lo que dice.
+ * @returns {string}
+ */
+export function updateStatusText ({ dir, current, lang = 'es', now = Date.now } = {}) {
+  const T = STATUS_TEXT[lang] || STATUS_TEXT.es
+  let a
+  try { a = dir ? readAsked(dir) : null } catch (e) { return T.unreadable(e.message) }
+  if (!a || a.result === 'approved' || !isNewer(a.version, current)) return ''
+  const day = new Date(a.askedAt).toISOString().slice(0, 10)
+  return a.result === 'pending' && now() - a.askedAt < ASK_TTL_MS ? T.waiting(a.version, day) : T.declined(a.version, day, a.pkg || '<pkg>')
+}
+
+const PREFS_TEXT = {
+  es: {
+    approval: { on: 'Este agente pide aprobación antes de actualizarse.', off: 'Este agente se actualiza solo, sin pedir aprobación.' },
+    notify: { on: 'Este agente avisa cuando se actualiza.', off: 'Este agente no avisa cuando se actualiza.' },
+    usage: 'uso: --approval [on|off]  --notify [on|off]',
+    unreadable: (m) => `No se pudieron leer las preferencias (${m}). Bórralas o ponlas de nuevo.`
+  },
+  en: {
+    approval: { on: 'This agent asks for approval before it updates.', off: 'This agent updates on its own, without asking for approval.' },
+    notify: { on: 'This agent tells you when it updates.', off: 'This agent does not tell you when it updates.' },
+    usage: 'usage: --approval [on|off]  --notify [on|off]',
+    unreadable: (m) => `The preferences could not be read (${m}). Delete them or set them again.`
+  }
+}
+
+/**
+ * `--approval [on|off]` Y `--notify [on|off]` PARA LA CLI DE CADA AGENTE, para no
+ * escribirlo cuatro veces. Con valor lo guarda; sin valor dice cómo está; sin argumentos
+ * enseña las dos líneas. Las dos banderas pueden ir juntas. No imprime: devuelve qué imprimir.
+ *
+ * @param {string[]} args  los argumentos del subcomando (p. ej. `['--approval', 'on']`)
+ * @returns {{ handled: boolean, ok: boolean, text: string, prefs?: { approval: boolean, notify: boolean } }}
+ *   `handled: false` solo si `args` trae algo y ninguna de las dos banderas (no era para
+ *   esto). `ok: false` con `text` listo para stderr si un valor no vale o las preferencias
+ *   no se pueden leer; en ese caso no se guarda nada.
+ */
+export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
+  const T = PREFS_TEXT[lang] || PREFS_TEXT.es
+  const asked = ['approval', 'notify'].filter((k) => args.includes(`--${k}`))
+  if (!asked.length && args.length) return { handled: false, ok: true, text: '' }
+  const change = {}
+  for (const k of asked) {
+    const v = args[args.indexOf(`--${k}`) + 1]
+    if (v === 'on' || v === 'off') change[k] = v === 'on'
+    else if (v !== undefined && !v.startsWith('--')) return { handled: true, ok: false, text: T.usage }
+  }
+  try {
+    const prefs = Object.keys(change).length ? writeUpdatePrefs(dir, change) : readUpdatePrefs(dir)
+    const show = asked.length ? asked : ['approval', 'notify']
+    return { handled: true, ok: true, text: show.map((k) => T[k][prefs[k] ? 'on' : 'off']).join('\n'), prefs }
+  } catch (e) {
+    return { handled: true, ok: false, text: T.unreadable(e.message) }
+  }
+}
+
 /**
  * EL FLUJO ENTERO, y lo único que llama un daemon: mirar, preguntar si puede, comprobar,
  * instalar y avisar de que hay que reiniciar.
  *
- * `mayUpdate({ pkg, version, from })` es donde quien llama le pregunta a la bóveda si el
- * dueño encendió la aprobación. SIN ÉL SE ACTUALIZA SIN PREGUNTAR, que es el valor por
- * defecto del ecosistema. Tiene que devolver `true` exacto: `false` es que no (y se dice), y
- * si LANZA tampoco se instala — no saber si hace falta permiso no es tener permiso.
+ * POR DEFECTO SE ACTUALIZA SIN PREGUNTAR. Pedir aprobación es una preferencia de CADA
+ * instancia (`readUpdatePrefs(dir).approval`, la enciende `--approval on`):
+ *
+ *   · apagada (el valor por defecto) — NO se llama a `mayUpdate`: se verifica y se instala.
+ *   · encendida — se llama a `mayUpdate({ pkg, version, from })`, que es donde quien llama
+ *     se lo pide a los aprobadores de su bóveda, UNA VEZ POR VERSIÓN. El contrato:
+ *       - devuelve `true`  → sí: se instala.
+ *       - devuelve `false` → no, o pasó un día sin respuesta (vencido es no). Queda apuntado
+ *         y ESA versión no se vuelve a preguntar (`not-approved`, y `already-declined` en
+ *         las pasadas siguientes). Solo una versión más nueva dispara otro pedido.
+ *       - LANZA → no se pudo preguntar (la bóveda no contesta, no hay red). No es una
+ *         negativa: no se apunta nada y se reintenta en la próxima pasada (`could-not-ask`).
+ *     Si no se pasó `mayUpdate` no hay a quién preguntar y no se instala (`no-approver`).
+ *   · preferencias ilegibles — no se instala (`prefs-unreadable`).
+ *
+ * Sin `dir` no hay preferencias: entonces se pregunta si, y solo si, se pasó `mayUpdate`.
+ *
+ * `dir` es la carpeta de datos de la instancia: de ahí salen las preferencias, y ahí queda el marcador `{ from, to, at }` que
+ * la versión nueva lee al arrancar para avisar de que se actualizó (`takeUpdateMarker`).
  *
  * `onInstalled({ version, from, restart })` se llama con la versión nueva ya en el disco.
  * `restart: true` solo si hay quien levante el proceso (`supervised`): ahí el daemon cierra
@@ -286,13 +495,14 @@ export function installNpmGlobal ({
  *
  * Nunca lanza. Devuelve `{ ok, code, version?, from?, reason? }`; `ok` es true en
  * `up-to-date`, `installed` e `installed-restart`, y false en `could-not-check`,
- * `not-self-updating`, `needs-root`, `could-not-ask`, `not-approved`, `unverified` (con
- * `why`: el código de `verifyNpmPackage`) e `install-failed`.
+ * `not-self-updating`, `needs-root`, `prefs-unreadable`, `asked-unreadable`, `no-approver`,
+ * `could-not-ask`, `not-approved`, `already-declined`, `unverified` (con `why`: el código de
+ * `verifyNpmPackage`) e `install-failed`.
  */
 export async function selfUpdateNpm ({
   pkg, current, repo, workflow = 'release.yml', mayUpdate = null, onInstalled = null,
-  log = () => {}, entry = process.argv[1], run = execFileSync, fetchImpl = fetch,
-  env = process.env, npm = findNpm(), gh = findGh(), home, platform, access, readFile
+  log = () => {}, dir = null, entry = process.argv[1], run = execFileSync, fetchImpl = fetch,
+  env = process.env, npm = findNpm(), gh = findGh(), home, platform, access, readFile, now = Date.now
 } = {}) {
   if (!pkg || !repo) return fail('could-not-check', 'selfUpdateNpm: `pkg` and `repo` are required')
   // `isNewer` da false si `current` no es una versión, y eso se leería como «al día».
@@ -315,15 +525,58 @@ export async function selfUpdateNpm ({
     return out('needs-root', reason)
   }
 
-  if (mayUpdate) {
-    let yes
-    try { yes = await mayUpdate({ pkg, version, from: current }) } catch (e) {
-      log(`[update] ${pkg} ${version} is out (this one is ${current}) · could not ask whether it may update (${e?.message || e}) · not updating`)
-      return out('could-not-ask', e?.message || String(e), e?.code ? { why: e.code } : {})
+  // ¿HAY QUE PEDIR PERMISO? Lo dice la preferencia de ESTA instancia (`dir`). Sin `dir` no
+  // hay preferencias, y entonces manda quien llama: si pasó `mayUpdate`, se pregunta.
+  let ask = !!mayUpdate
+  if (dir) {
+    try { ask = readUpdatePrefs(dir).approval } catch (e) {
+      log(`[update] ${pkg} ${version} is out (this one is ${current}) · its update preferences could not be read (${e.message}) · not updating`)
+      return out('prefs-unreadable', e.message)
     }
-    if (yes !== true) {
-      log(`[update] ${pkg} ${version} is out (this one is ${current}) · not approved · it will ask again`)
-      return out('not-approved', 'the update was not approved')
+  }
+  if (ask) {
+    // ENCENDIDA Y SIN A QUIÉN PREGUNTAR: no se instala. El dueño pidió decidir, y que no
+    // haya por dónde preguntarle no convierte la pregunta en un sí.
+    if (!mayUpdate) {
+      log(`[update] ${pkg} ${version} is out (this one is ${current}) · approval is on but there is nobody to ask · not updating`)
+      return out('no-approver', 'approval is on but this piece has no way to ask for it')
+    }
+    // UNA VEZ POR VERSIÓN (hace falta `dir` para apuntarlo). Lo ya preguntado —negado, o a
+    // medias cuando el proceso se reinició— no se vuelve a preguntar; solo una versión MÁS
+    // NUEVA que la apuntada dispara otro pedido.
+    let asked = null
+    if (dir) {
+      try { asked = readAsked(dir) } catch (e) {
+        log(`[update] ${pkg} ${version} is out (this one is ${current}) · what was already asked could not be read (${e.message}) · not updating`)
+        return out('asked-unreadable', e.message)
+      }
+    }
+    const already = asked && !isNewer(version, asked.version)
+    if (already && asked.result !== 'approved') {
+      return out('already-declined', `approval to install ${asked.version} was already asked and not given: it will not ask again`, { askedAt: asked.askedAt })
+    }
+    if (!already) {
+      const note = (result, askedAt) => { if (dir) writeJson(path.join(dir, UPDATE_ASKED_FILE), { v: 1, pkg, version, askedAt, result }) }
+      const askedAt = now()
+      try { note('pending', askedAt) } catch (e) {
+        log(`[update] ${pkg} ${version} is out (this one is ${current}) · the request could not be noted (${e.message}) · not updating`)
+        return out('asked-unreadable', e.message)
+      }
+      let yes
+      try { yes = await mayUpdate({ pkg, version, from: current }) } catch (e) {
+        // NO SE PUDO PREGUNTAR (la bóveda no contesta, no hay red): eso no es una negativa.
+        // No queda apuntado nada y se reintenta en la próxima pasada.
+        if (dir) dropAsked(dir)
+        log(`[update] ${pkg} ${version} is out (this one is ${current}) · could not ask whether it may update (${e?.message || e}) · not updating, it will ask on the next check`)
+        return out('could-not-ask', e?.message || String(e), e?.code ? { why: e.code } : {})
+      }
+      if (yes !== true) {
+        try { note('denied', askedAt) } catch (_) { /* queda `pending`, que cuenta igual */ }
+        log(`[update] ${pkg} ${version} is out (this one is ${current}) · not approved (denied, or a day went by) · it will not ask again for this version · install it by hand with: npm i -g ${pkg}@${version}`)
+        return out('not-approved', 'the update was not approved', { askedAt })
+      }
+      // El sí también se apunta: si después la instalación falla, no se vuelve a molestar.
+      try { note('approved', askedAt) } catch (_) {}
     }
   }
 
@@ -338,6 +591,14 @@ export async function selfUpdateNpm ({
     log(`[update] ${pkg} ${version} NOT installed: ${done.reason}`)
     return out(done.code, done.reason)
   }
+  // EL MARCADOR, para que la versión nueva avise al arrancar de que se actualizó. Si no se
+  // puede escribir, la instalación vale igual: se dice, y lo único que se pierde es el aviso.
+  if (dir) {
+    try { writeJson(path.join(dir, UPDATE_MARKER_FILE), { v: 1, pkg, from: current, to: version, at: now() }) } catch (e) {
+      log(`[update] could not leave the update marker in ${dir}: ${e.message}`)
+    }
+  }
+  if (dir) dropAsked(dir)
   const restart = supervised({ env })
   log(restart
     ? `[update] ${pkg} ${version} installed (verified against its provenance) · restarting now to run it`
@@ -352,15 +613,34 @@ export async function selfUpdateNpm ({
  * esperar al día siguiente, y solo se dice cuando el motivo cambia. Devuelve cómo pararlo.
  *
  * `onResult(r)` recibe cada resultado: es lo que una pantalla de estado necesita para decir
- * «al día», «no se pudo mirar» o «pide permiso», que son tres cosas distintas.
+ * «al día», «no se pudo mirar» o «pide permiso», que son tres cosas distintas. *
+ * `onUpdated({ version, from })` se llama UNA vez, al arrancar, si esta es la versión que se
+ * acaba de instalar (hace falta `dir`) y la instancia no apagó los avisos
+ * (`readUpdatePrefs(dir).notify`). Es donde el daemon se lo dice a su bóveda. Si lanza, el
+ * marcador no se pierde: se reintenta en el próximo arranque.
  */
 export function watchSelfUpdateNpm ({
-  everyMs = CHECK_EVERY_MS, retryMs = RETRY_MS, onResult = null, log = () => {}, ...opts
+  everyMs = CHECK_EVERY_MS, retryMs = RETRY_MS, onResult = null, onUpdated = null, log = () => {}, ...opts
 } = {}) {
   let stopped = false
   let busy = false
   let lastFail = null
   let retry = null
+  // ¿ME ACABO DE ACTUALIZAR? Se mira una vez, al arrancar, y no frena lo demás. El marcador
+  // solo se borra cuando el aviso SALIÓ (o cuando el dueño apagó los avisos): si avisar
+  // falla, se queda para el próximo arranque.
+  const avisar = async () => {
+    if (!onUpdated || !opts.dir) return
+    try {
+      const m = peekUpdateMarker({ dir: opts.dir, current: opts.current })
+      if (!m) return
+      if (readUpdatePrefs(opts.dir).notify) await onUpdated({ version: m.to, from: m.from })
+      dropMarker(opts.dir)
+    } catch (e) {
+      log(`[update] could not tell that ${opts.pkg} updated (${e?.message || e}) · it will try again on the next start`)
+    }
+  }
+  avisar()
   const mirar = async () => {
     if (stopped || busy) return
     busy = true

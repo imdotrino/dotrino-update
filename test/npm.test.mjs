@@ -15,7 +15,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import {
-  installKind, supervised, verifyNpmPackage, installNpmGlobal, selfUpdateNpm, watchSelfUpdateNpm, findNpm
+  installKind, supervised, verifyNpmPackage, installNpmGlobal, selfUpdateNpm, watchSelfUpdateNpm, findNpm,
+  readUpdatePrefs, writeUpdatePrefs, takeUpdateMarker, updatePrefsCommand, updateStatusText, UPDATE_PREFS_FILE, UPDATE_MARKER_FILE, UPDATE_ASKED_FILE, ASK_TTL_MS
 } from '../src/npm.js'
 import { findGh } from '../src/fetch.js'
 
@@ -338,6 +339,241 @@ test('el vigía instala lo que encuentra y entrega el resultado', async () => {
   stop()
   assert.deepEqual(vistos, ['installed'])
   assert.equal(m.instalada(), '1.1.0')
+})
+
+// --- las preferencias de cada instancia --------------------------------------------------
+
+const carpeta = () => fs.mkdtempSync(path.join(os.tmpdir(), 'upd-prefs-'))
+
+test('preferencias: por defecto se actualiza sola y avisa; se cambia una sin tocar la otra', () => {
+  const dir = carpeta()
+  assert.deepEqual(readUpdatePrefs(dir), { approval: false, notify: true })
+  assert.deepEqual(writeUpdatePrefs(dir, { notify: false }), { approval: false, notify: false })
+  assert.deepEqual(writeUpdatePrefs(dir, { approval: true }), { approval: true, notify: false }, 'lo que no se pasa queda como estaba')
+  assert.deepEqual(readUpdatePrefs(dir), { approval: true, notify: false })
+  assert.equal(fs.statSync(path.join(dir, UPDATE_PREFS_FILE)).mode & 0o777, 0o600)
+  assert.throws(() => writeUpdatePrefs(dir, { notify: 'off' }), (e) => e.code === 'bad-pref')
+  assert.throws(() => writeUpdatePrefs(dir, {}), (e) => e.code === 'bad-pref')
+  assert.throws(() => writeUpdatePrefs(dir, { otra: true }), (e) => e.code === 'bad-pref')
+})
+
+test('preferencias ilegibles no son «las de por defecto»: se lanza, y tampoco se pisan a ciegas', () => {
+  const dir = carpeta()
+  for (const basura of ['', 'no es json', '{"notify":true}', '{"approval":"si","notify":true}']) {
+    fs.writeFileSync(path.join(dir, UPDATE_PREFS_FILE), basura)
+    assert.throws(() => readUpdatePrefs(dir), (e) => e.code === 'prefs-unreadable', JSON.stringify(basura))
+    assert.throws(() => writeUpdatePrefs(dir, { notify: false }), (e) => e.code === 'prefs-unreadable')
+  }
+})
+
+test('CLI: sin argumentos enseña las dos; con bandera guarda o dice cómo está, en es y en en', () => {
+  const dir = carpeta()
+  assert.deepEqual(updatePrefsCommand([], { dir }), {
+    handled: true, ok: true, prefs: { approval: false, notify: true },
+    text: 'Este agente se actualiza solo, sin pedir aprobación.\nEste agente avisa cuando se actualiza.'
+  })
+  const on = updatePrefsCommand(['--approval', 'on'], { dir })
+  assert.deepEqual([on.ok, on.text, on.prefs.approval], [true, 'Este agente pide aprobación antes de actualizarse.', true])
+  assert.equal(updatePrefsCommand(['--approval'], { dir }).text, 'Este agente pide aprobación antes de actualizarse.', 'sin valor dice cómo está')
+  assert.equal(updatePrefsCommand(['--notify', 'off'], { dir, lang: 'en' }).text, 'This agent does not tell you when it updates.')
+  const dos = updatePrefsCommand(['--approval', 'off', '--notify', 'on'], { dir, lang: 'en' })
+  assert.equal(dos.text, 'This agent updates on its own, without asking for approval.\nThis agent tells you when it updates.')
+  assert.deepEqual(readUpdatePrefs(dir), { approval: false, notify: true })
+  const mal = updatePrefsCommand(['--notify', 'quizas'], { dir })
+  assert.deepEqual([mal.handled, mal.ok], [true, false])
+  assert.match(mal.text, /--approval \[on\|off\]/)
+  assert.equal(updatePrefsCommand(['--otra-cosa'], { dir }).handled, false, 'lo que no es para esto no se atiende')
+  fs.writeFileSync(path.join(dir, UPDATE_PREFS_FILE), 'basura')
+  const roto = updatePrefsCommand(['--notify', 'on'], { dir })
+  assert.deepEqual([roto.handled, roto.ok], [true, false])
+  assert.match(roto.text, /No se pudieron leer/)
+})
+
+test('APROBACIÓN POR INSTANCIA: apagada no pregunta aunque haya a quién; encendida, sin un sí no instala', async () => {
+  const off = mundo(); const d1 = carpeta()
+  let preguntado = false
+  const r1 = await selfUpdateNpm({ ...off.opts, dir: d1, mayUpdate: () => { preguntado = true; return false } })
+  assert.equal(r1.code, 'installed', 'por defecto se instala')
+  assert.equal(preguntado, false, 'y no se llama a mayUpdate')
+
+  const on = mundo(); const d2 = carpeta(); writeUpdatePrefs(d2, { approval: true })
+  const no = await selfUpdateNpm({ ...on.opts, dir: d2, mayUpdate: async () => false })
+  assert.deepEqual([no.ok, no.code], [false, 'not-approved'])
+  assert.equal(instalo(on), false)
+  const d3 = carpeta(); writeUpdatePrefs(d3, { approval: true })
+  const si = await selfUpdateNpm({ ...mundo().opts, dir: d3, mayUpdate: async () => true })
+  assert.equal(si.code, 'installed')
+})
+
+test('encendida y sin a quién preguntar, o con las preferencias rotas: no se instala y se dice', async () => {
+  const m = mundo(); const dir = carpeta(); writeUpdatePrefs(dir, { approval: true })
+  const nadie = await selfUpdateNpm({ ...m.opts, dir })
+  assert.deepEqual([nadie.ok, nadie.code], [false, 'no-approver'])
+  const cae = await selfUpdateNpm({ ...m.opts, dir, mayUpdate: async () => { throw new Error('the vault did not reply') } })
+  assert.deepEqual([cae.ok, cae.code], [false, 'could-not-ask'])
+  fs.writeFileSync(path.join(dir, UPDATE_PREFS_FILE), 'basura')
+  const roto = await selfUpdateNpm({ ...m.opts, dir, mayUpdate: async () => true })
+  assert.deepEqual([roto.ok, roto.code], [false, 'prefs-unreadable'])
+  assert.equal(instalo(m), false)
+  assert.match(m.lines.at(-1), /not updating/)
+})
+
+// --- el permiso se pide UNA vez por versión ----------------------------------------------
+
+const conAprobacion = () => { const dir = carpeta(); writeUpdatePrefs(dir, { approval: true }); return dir }
+
+test('negado (o vencido) no se vuelve a pedir para esa versión, y el estado lo dice', async () => {
+  const m = mundo(); const dir = conAprobacion()
+  let veces = 0
+  const mayUpdate = async () => { veces++; return false }
+  const t0 = Date.UTC(2026, 9, 8, 12)
+  const r1 = await selfUpdateNpm({ ...m.opts, dir, mayUpdate, now: () => t0 })
+  assert.deepEqual([r1.code, r1.askedAt], ['not-approved', t0])
+  for (const despues of [t0 + 60_000, t0 + 3 * ASK_TTL_MS]) {
+    const r = await selfUpdateNpm({ ...m.opts, dir, mayUpdate, now: () => despues })
+    assert.deepEqual([r.ok, r.code, r.askedAt], [false, 'already-declined', t0], 'ni al rato ni al día siguiente')
+  }
+  assert.equal(veces, 1, 'se preguntó UNA vez')
+  assert.equal(instalo(m), false)
+  assert.equal(updateStatusText({ dir, current: '1.0.0' }),
+    'se pidió permiso para instalar la 1.1.0 el 2026-10-08 y no se aprobó: no se vuelve a pedir · instálala con: npm i -g @dotrino/demo@1.1.0')
+  assert.match(updateStatusText({ dir, current: '1.0.0', lang: 'en' }), /approval to install 1\.1\.0 was asked on 2026-10-08 and not given: it will not ask again · install it with: npm i -g @dotrino\/demo@1\.1\.0/)
+  assert.equal(updateStatusText({ dir, current: '1.1.0' }), '', 'ya instalada a mano: nada que decir')
+})
+
+test('una versión MÁS NUEVA dispara otro pedido', async () => {
+  const dir = conAprobacion()
+  const pedidas = []
+  const mayUpdate = async ({ version }) => { pedidas.push(version); return false }
+  await selfUpdateNpm({ ...mundo({ latest: '1.1.0' }).opts, dir, mayUpdate })
+  await selfUpdateNpm({ ...mundo({ latest: '1.1.0' }).opts, dir, mayUpdate })
+  const m = mundo({ latest: '1.2.0' })
+  await selfUpdateNpm({ ...m.opts, dir, mayUpdate: async ({ version }) => { pedidas.push(version); return true } })
+  assert.deepEqual(pedidas, ['1.1.0', '1.2.0'])
+  assert.equal(m.instalada(), '1.2.0')
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_ASKED_FILE)), false, 'instalada, el apunte se borra')
+})
+
+test('se apunta AL PEDIR: un reinicio con el pedido a medias cuenta como ya preguntada', async () => {
+  const m = mundo(); const dir = conAprobacion()
+  let apuntado = null
+  const t0 = Date.UTC(2026, 9, 8, 12)
+  // El proceso «muere» esperando: la promesa no se resuelve nunca.
+  selfUpdateNpm({ ...m.opts, dir, now: () => t0, mayUpdate: () => { apuntado = JSON.parse(fs.readFileSync(path.join(dir, UPDATE_ASKED_FILE), 'utf8')); return new Promise(() => {}) } })
+  await new Promise((r) => setTimeout(r, 30))
+  assert.deepEqual([apuntado.version, apuntado.result, apuntado.askedAt], ['1.1.0', 'pending', t0])
+  // Arranca de nuevo.
+  let veces = 0
+  const r = await selfUpdateNpm({ ...m.opts, dir, mayUpdate: async () => { veces++; return true } })
+  assert.deepEqual([r.code, veces], ['already-declined', 0])
+  assert.match(updateStatusText({ dir, current: '1.0.0', now: () => t0 + 60_000 }), /espera tu respuesta/)
+  assert.match(updateStatusText({ dir, current: '1.0.0', now: () => t0 + ASK_TTL_MS + 1 }), /no se aprobó/, 'pasado un día se da por negado')
+})
+
+test('un fallo de transporte NO es una negativa: no se apunta nada y se vuelve a preguntar', async () => {
+  const m = mundo(); const dir = conAprobacion()
+  let veces = 0
+  const caida = async () => { veces++; throw Object.assign(new Error('the vault did not reply'), { code: 'vault-no-reply' }) }
+  const r1 = await selfUpdateNpm({ ...m.opts, dir, mayUpdate: caida })
+  assert.deepEqual([r1.code, r1.why], ['could-not-ask', 'vault-no-reply'])
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_ASKED_FILE)), false)
+  assert.equal(updateStatusText({ dir, current: '1.0.0' }), '')
+  await selfUpdateNpm({ ...m.opts, dir, mayUpdate: caida })
+  const r3 = await selfUpdateNpm({ ...m.opts, dir, mayUpdate: async () => { veces++; return true } })
+  assert.deepEqual([r3.code, veces], ['installed', 3], 'se preguntó en cada pasada hasta que hubo respuesta')
+})
+
+test('un sí también se recuerda: si la instalación falla, no se vuelve a molestar', async () => {
+  const dir = conAprobacion()
+  let veces = 0
+  const mayUpdate = async () => { veces++; return true }
+  const roto = mundo({ gh: 'bad' })
+  assert.equal((await selfUpdateNpm({ ...roto.opts, dir, mayUpdate })).code, 'unverified')
+  assert.equal(updateStatusText({ dir, current: '1.0.0' }), '', 'aprobada: no hay nada que reclamar')
+  const bien = mundo()
+  assert.equal((await selfUpdateNpm({ ...bien.opts, dir, mayUpdate })).code, 'installed')
+  assert.equal(veces, 1)
+})
+
+test('si lo ya preguntado no se puede leer, no se instala y se dice', async () => {
+  const m = mundo(); const dir = conAprobacion()
+  fs.writeFileSync(path.join(dir, UPDATE_ASKED_FILE), 'basura')
+  let veces = 0
+  const r = await selfUpdateNpm({ ...m.opts, dir, mayUpdate: async () => { veces++; return true } })
+  assert.deepEqual([r.ok, r.code, veces], [false, 'asked-unreadable', 0])
+  assert.equal(instalo(m), false)
+  assert.match(updateStatusText({ dir, current: '1.0.0' }), /no se pudo leer/)
+})
+
+// --- avisar de que se actualizó ----------------------------------------------------------
+
+test('al instalar queda el marcador, y solo lo recoge la versión que se instaló', async () => {
+  const m = mundo(); const dir = carpeta()
+  await selfUpdateNpm({ ...m.opts, dir, now: () => 1234 })
+  const escrito = JSON.parse(fs.readFileSync(path.join(dir, UPDATE_MARKER_FILE), 'utf8'))
+  assert.deepEqual([escrito.from, escrito.to, escrito.at, escrito.pkg], ['1.0.0', '1.1.0', 1234, PKG])
+
+  assert.equal(takeUpdateMarker({ dir, current: '1.0.0' }), null, 'todavía corre la vieja: no ha ocurrido')
+  assert.ok(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)), 'y el marcador espera al próximo arranque')
+  assert.deepEqual(takeUpdateMarker({ dir, current: '1.1.0' }), { from: '1.0.0', to: '1.1.0' })
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)), false, 'recogido, se borra')
+  assert.equal(takeUpdateMarker({ dir, current: '1.1.0' }), null, 'una sola vez')
+})
+
+test('un marcador de una versión ya superada caduca; uno ilegible se dice', () => {
+  const dir = carpeta()
+  fs.writeFileSync(path.join(dir, UPDATE_MARKER_FILE), JSON.stringify({ from: '1.0.0', to: '1.1.0', at: 1 }))
+  assert.equal(takeUpdateMarker({ dir, current: '1.2.0' }), null)
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)), false)
+  fs.writeFileSync(path.join(dir, UPDATE_MARKER_FILE), 'basura')
+  assert.throws(() => takeUpdateMarker({ dir, current: '1.1.0' }), (e) => e.code === 'marker-unreadable')
+  assert.equal(takeUpdateMarker({ dir: carpeta(), current: '1.1.0' }), null, 'sin marcador no hay nada que decir')
+})
+
+test('si no hay instalación, no hay marcador', async () => {
+  const m = mundo({ gh: 'bad' }); const dir = carpeta()
+  await selfUpdateNpm({ ...m.opts, dir })
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)), false)
+})
+
+const marcado = () => { const dir = carpeta(); fs.writeFileSync(path.join(dir, UPDATE_MARKER_FILE), JSON.stringify({ from: '1.0.0', to: '1.1.0', at: 1 })); return dir }
+const vigia = async (extra) => {
+  const m = mundo({ current: '1.1.0' })
+  const stop = watchSelfUpdateNpm({ ...m.opts, everyMs: 60_000, ...extra })
+  await new Promise((r) => setTimeout(r, 60))
+  stop()
+  return m
+}
+
+test('el vigía avisa UNA vez al arrancar de que se actualizó, y entonces borra el marcador', async () => {
+  const dir = marcado(); const avisos = []
+  await vigia({ dir, onUpdated: (e) => avisos.push(e) })
+  assert.deepEqual(avisos, [{ version: '1.1.0', from: '1.0.0' }])
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)), false)
+  await vigia({ dir, onUpdated: (e) => avisos.push(e) })
+  assert.equal(avisos.length, 1, 'en el siguiente arranque ya no hay nada que decir')
+})
+
+test('con los avisos apagados no avisa (y el marcador se va igual)', async () => {
+  const dir = marcado(); writeUpdatePrefs(dir, { notify: false })
+  let avisado = false
+  await vigia({ dir, onUpdated: () => { avisado = true } })
+  assert.equal(avisado, false)
+  assert.equal(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)), false)
+})
+
+test('si avisar falla, el marcador NO se pierde: se reintenta en el próximo arranque, y se registra', async () => {
+  const dir = marcado()
+  const m = await vigia({ dir, onUpdated: async () => { throw new Error('the vault did not reply') } })
+  assert.ok(fs.existsSync(path.join(dir, UPDATE_MARKER_FILE)))
+  assert.ok(m.lines.some((l) => /could not tell that @dotrino\/demo updated \(the vault did not reply\)/.test(l)))
+  const avisos = []
+  await vigia({ dir, onUpdated: (e) => avisos.push(e) })
+  assert.equal(avisos.length, 1)
+  // Y con las preferencias rotas tampoco se pierde.
+  const d2 = marcado(); fs.writeFileSync(path.join(d2, UPDATE_PREFS_FILE), 'basura')
+  await vigia({ dir: d2, onUpdated: () => {} })
+  assert.ok(fs.existsSync(path.join(d2, UPDATE_MARKER_FILE)))
 })
 
 // --- contra el registro de verdad ------------------------------------------------------

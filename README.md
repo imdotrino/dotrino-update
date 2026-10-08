@@ -23,7 +23,7 @@ baja **se comprueba antes de tocar el disco**; si no se puede comprobar, no se i
 |---|---|---|
 | **Mirar** (`checkForUpdate`, `watchForUpdate`) | la pieza, sola, una vez al día | es una lectura |
 | **Traer un binario** (`fetchVerified`) | el producto | atestación de sigstore del release |
-| **Actualizarse por npm** (`./npm`) | la pieza, sola (decisión del dueño, 2026-10-08) | procedencia de npm firmada + `mayUpdate` si el dueño encendió la aprobación |
+| **Actualizarse por npm** (`./npm`) | la pieza, sola (decisión del dueño, 2026-10-08) | procedencia de npm firmada; y aprobación, si esa instancia la encendió |
 
 ## Mirar
 
@@ -106,26 +106,74 @@ await printUpdateNotice({
 
 ## Actualizarse sola por npm (`@dotrino/update/npm`)
 
-Para un daemon instalado con `npm install -g`. **Por defecto se actualiza sin preguntar**;
-pedir permiso es un ajuste del dueño, y se le pregunta a la bóveda en `mayUpdate`.
+Para un daemon instalado con `npm install -g`. **Por defecto se actualiza sin preguntar y
+avisa de que lo hizo.** Las dos cosas son preferencias de **cada instancia** (no de la
+bóveda), en `update-prefs.json` dentro de su carpeta de datos.
 
 ```js
-import { watchSelfUpdateNpm } from '@dotrino/update/npm'
+import { watchSelfUpdateNpm, updatePrefsCommand, updateStatusText } from '@dotrino/update/npm'
 
 const stop = watchSelfUpdateNpm({
   pkg: '@dotrino/terminal-agent',            // el paquete que corre
   current: VERSION,                          // su versión, la que está en marcha
   repo: 'imdotrino/dotrino-terminal',        // de dónde tiene que haber salido
-  // Opcional. Sin él no pregunta a nadie. Tiene que devolver `true` exacto; si lanza, no instala.
+  dir: instanceDir,                          // carpeta de datos de ESTA instancia
+  // Solo se llama si la instancia encendió `approval`. true = sí · false = no o venció · lanza = no pude preguntar.
   mayUpdate: ({ pkg, version, from }) => askTheVault({ product: pkg, version, from }),
   // Con la versión nueva ya en el disco. `restart` solo es true si hay quien lo levante.
   onInstalled: async ({ version, restart }) => { if (restart) { await closeCleanly(); process.exit(0) } },
+  // Una vez, al arrancar ya en la versión nueva, si la instancia no apagó `notify`.
+  onUpdated: ({ version, from }) => tellTheVault({ product: pkg, version, from }),
   onResult: (r) => { lastUpdate = r },       // para la pantalla de estado
   log: (line) => console.log(line)
 })
+
+// En la CLI del agente: `<agente> update [--approval on|off] [--notify on|off]`
+const r = updatePrefsCommand(args, { dir: instanceDir, lang })
+if (r.handled) { (r.ok ? console.log : console.error)(r.text); process.exit(r.ok ? 0 : 2) }
+
+// En su `info`/estado: una línea, o '' si no hay nada que decir.
+const line = updateStatusText({ dir: instanceDir, current: VERSION, lang })
 ```
 
 Mira al arrancar y una vez al día; si no pudo mirar, reintenta en una hora.
+
+### Las dos preferencias de cada instancia
+
+`readUpdatePrefs(dir)` → `{ approval, notify }` · `writeUpdatePrefs(dir, { approval?, notify? })`
+cambia solo lo que se le pasa y devuelve cómo quedaron.
+
+| | Por defecto | Qué hace |
+|---|---|---|
+| `approval` | `false` | apagada: se instala sin llamar a `mayUpdate`. Encendida: sin un sí no se instala |
+| `notify` | `true` | avisar (`onUpdated`) cuando la versión nueva ya corre |
+
+Un archivo que existe y no se puede leer **no** es «los valores por defecto»: lanza con
+`code: 'prefs-unreadable'`, y `selfUpdateNpm` no instala.
+
+### El contrato de `mayUpdate` (solo con `approval` encendida)
+
+Se pide **una vez por versión**; el permiso vale un día y vencido es no.
+
+| `mayUpdate` | Significa | Qué pasa |
+|---|---|---|
+| devuelve `true` | sí | se verifica y se instala |
+| devuelve `false` (o cualquier otra cosa) | no, **o pasó un día sin respuesta** | queda apuntado: esa versión **no se vuelve a preguntar**. Solo una versión más nueva dispara otro pedido |
+| **lanza** | no se pudo preguntar (la bóveda no contesta, no hay red) | **no es una negativa**: no se apunta nada y se reintenta en la próxima pasada |
+
+Lo preguntado se apunta **al pedir** (`update-asked.json`: `{ pkg, version, askedAt, result }`),
+así que un reinicio con el pedido a medias cuenta como ya preguntada. Por eso `mayUpdate`
+tiene que esperar la respuesta (hasta un día) y devolver `false` al vencer, no lanzar.
+`updateStatusText` lo enseña: *«se pidió permiso para instalar la X el <fecha> y no se
+aprobó: no se vuelve a pedir · instálala con: npm i -g <pkg>@X»*.
+
+### Avisar de que se actualizó
+
+Al instalar, `selfUpdateNpm` deja en `dir` un marcador (`updated.json`: `{ from, to, at }`).
+Al arrancar, si la versión que corre es la instalada, `onUpdated({ version, from })` se llama
+una vez y el marcador se borra; **si `onUpdated` lanza, el marcador se queda** y se reintenta
+en el próximo arranque. Con `notify` apagada no se llama. Para quien arme otro flujo:
+`takeUpdateMarker({ dir, current })` → `{ from, to }` (y lo borra) o `null`.
 
 **Qué se actualiza solo** (`installKind()`):
 
@@ -148,8 +196,12 @@ Nunca lanza.
 | `could-not-check` | no | no se pudo mirar — **no es «al día»** |
 | `not-self-updating` | no | no es una instalación global (`kind` dice cuál) |
 | `needs-root` | no | el prefijo global no es de este usuario; no se intentó |
-| `could-not-ask` | no | `mayUpdate` lanzó: no saber si hace falta permiso no es tener permiso |
-| `not-approved` | no | `mayUpdate` no devolvió `true` |
+| `prefs-unreadable` | no | las preferencias de la instancia existen y no se pueden leer |
+| `asked-unreadable` | no | lo ya preguntado existe y no se puede leer (o no se pudo apuntar) |
+| `no-approver` | no | `approval` encendida y no se pasó `mayUpdate`: no hay a quién preguntar |
+| `could-not-ask` | no | `mayUpdate` lanzó: se reintenta en la próxima pasada (`why` trae su `code`) |
+| `not-approved` | no | `mayUpdate` no devolvió `true`; esa versión no se vuelve a preguntar |
+| `already-declined` | no | esa versión ya se preguntó y no se aprobó (`askedAt`) |
 | `unverified` | no | la procedencia no se pudo comprobar (`why` trae el motivo) |
 | `install-failed` | no | npm falló, o dijo que sí y dejó otra versión |
 
@@ -174,7 +226,7 @@ versión subida a mano no trae procedencia y ninguna pieza la instalará sola. Y
 necesita `gh` (un binario de usuario en `~/.local/bin` basta, sin iniciar sesión).
 
 Se instala con `--ignore-scripts`. Las piezas sueltas (`installKind`, `verifyNpmPackage`,
-`installNpmGlobal`, `supervised`, `findNpm`) se exportan para quien arme otro flujo.
+`installNpmGlobal`, `supervised`, `findNpm`, `takeUpdateMarker`) se exportan para quien arme otro flujo.
 
 ## Instalar un binario
 
