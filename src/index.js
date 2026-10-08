@@ -16,14 +16,14 @@
  *   > no existe ningún interruptor remoto. Nadie —tampoco Dotrino— puede dejar sin
  *   > funcionar el software que alguien se instaló en su máquina.   (CLAUDE.md)
  *
- * Un auto-descargador es esa misma puerta en el otro sentido: un canal por el que meter
- * código en la máquina de alguien sin que nadie diga que sí. Si el pipeline de release se
- * compromete, cada pieza se lo traga sola — y una de ellas guarda la maestra. Así que esto
- * se parte en dos, y solo la mitad inofensiva es automática:
+ * Nada de esto lo dispara Dotrino: la pieza mira el registro público por su cuenta. Tres
+ * entradas:
  *
  *   · MIRAR (`checkForUpdate`) — una lectura. No puede romper nada, y va sola.
- *   · TRAER E INSTALAR (`fetchVerified`) — lo dispara una persona, y VERIFICA antes de
- *     tocar el disco.
+ *   · TRAER UN BINARIO (`./fetch`, `fetchVerified`) — VERIFICA antes de tocar el disco.
+ *   · ACTUALIZARSE POR NPM (`./npm`, `selfUpdateNpm`) — va sola por defecto (dueño,
+ *     2026-10-08: lo que importa es estar al día; pedir permiso es un ajuste que se
+ *     enciende a propósito), y también verifica antes de instalar.
  *
  * Que la URL sea la correcta no prueba nada: quien está siendo atacado también cree que su
  * URL es la buena. Por eso lo que se baja se contrasta contra la atestación de sigstore que

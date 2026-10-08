@@ -59,18 +59,8 @@ export async function download (asset, { fetchImpl = fetch, dir = null, product,
  */
 export async function verifyArtifact (file, { repo, run = execFileSync, fetchImpl = fetch, gh = findGh() } = {}) {
   if (!repo) return { ok: false, reason: 'verifyArtifact: `repo` is required' }
-  try { run(gh, ['--version'], { stdio: 'ignore' }) } catch (_) {
-    return {
-      ok: false, code: 'NO_GH',
-      reason: `gh is not installed, so the download cannot be verified. Install GitHub CLI (a user binary in ~/.local/bin is enough; no login needed), or check it by hand: gh attestation verify <file> --repo ${repo}`
-    }
-  }
-  try { run(gh, ['attestation', 'verify', '--help'], { stdio: 'ignore' }) } catch (_) {
-    return {
-      ok: false, code: 'GH_TOO_OLD',
-      reason: `this gh cannot verify attestations (it predates \`gh attestation\`, 2.49). Update GitHub CLI, or check it by hand: gh attestation verify <file> --repo ${repo}`
-    }
-  }
+  const noGh = ghReady({ run, gh, hint: `gh attestation verify <file> --repo ${repo}` })
+  if (noGh) return noGh
   // La atestación de ESTE archivo, por su hash, sin credenciales.
   const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
   let bundles
@@ -109,9 +99,31 @@ export async function verifyArtifact (file, { repo, run = execFileSync, fetchImp
  * tiene esa carpeta en su PATH: el 2026-09-24 la bóveda de la PC del dueño encontraba
  * `/usr/bin/gh` 2.46 y no se actualizaba, con un `gh` bueno instalado al lado.
  */
-function findGh () {
+export function findGh () {
   const local = path.join(os.homedir(), '.local', 'bin', 'gh')
   return fs.existsSync(local) ? local : 'gh'
+}
+
+/**
+ * ¿Hay un `gh` que sepa verificar atestaciones? `null` si sí; si no, el fallo ya armado
+ * (`NO_GH` / `GH_TOO_OLD`). Lo comparten el binario (`verifyArtifact`) y el paquete de npm
+ * (`./npm`): las dos verificaciones se apoyan en la misma herramienta.
+ */
+export function ghReady ({ run = execFileSync, gh = findGh(), hint = '' } = {}) {
+  const byHand = hint ? `, or check it by hand: ${hint}` : ''
+  try { run(gh, ['--version'], { stdio: 'ignore' }) } catch (_) {
+    return {
+      ok: false, code: 'NO_GH',
+      reason: `gh is not installed, so the download cannot be verified. Install GitHub CLI (a user binary in ~/.local/bin is enough; no login needed)${byHand}`
+    }
+  }
+  try { run(gh, ['attestation', 'verify', '--help'], { stdio: 'ignore' }) } catch (_) {
+    return {
+      ok: false, code: 'GH_TOO_OLD',
+      reason: `this gh cannot verify attestations (it predates \`gh attestation\`, 2.49). Update GitHub CLI${byHand}`
+    }
+  }
+  return null
 }
 
 /** Bajar y verificar, que es lo que casi siempre se quiere junto. No instala: eso es del producto. */
