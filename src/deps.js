@@ -10,6 +10,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { watchForUpdate } from './index.js'
+import { printUpdateNotice } from './notice.js'
 
 const fail = (message, code) => Object.assign(new Error(message), { code })
 
@@ -52,4 +53,18 @@ export function watchDependencies ({ dir, match, name = 'service', log = console
     }
   }))
   return () => { for (const stop of stops) stop() }
+}
+
+/**
+ * Lo mismo para un COMANDO que corre desde un checkout (un bot de cron, una CLI que no está
+ * en npm): al terminar la orden, una línea por stderr por cada pilar que quedó atrás. Con la
+ * caché de un día y el tope de `printUpdateNotice`, así que no hace lenta la orden.
+ *
+ * Devuelve cuántos avisos imprimió. Lanza lo mismo que `installedDeps`.
+ */
+export async function printDependencyNotices ({ dir, match, how = 'bump it in package.json', ...rest } = {}) {
+  const printed = await Promise.all(installedDeps({ dir, match }).map((d) => printUpdateNotice({
+    ...rest, current: d.version, source: 'npm', pkg: d.pkg, product: d.pkg, how
+  })))
+  return printed.filter(Boolean).length
 }

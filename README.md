@@ -121,6 +121,10 @@ Solo mira y lo dice. Una dependencia declarada y sin instalar **lanza**
 (`code: 'deps-not-installed'`): es un despliegue a medias, no «al día». `installedDeps({ dir })`
 da la lista para una pantalla de estado. Desde CommonJS: `await import('@dotrino/update/deps')`.
 
+Para un **comando** que corre desde un checkout (un bot de cron), al terminar la orden:
+`await printDependencyNotices({ dir })` — una línea por stderr por cada pilar atrasado, con
+la caché de un día de `printUpdateNotice`.
+
 ## Actualizarse sola por npm (`@dotrino/update/npm`)
 
 Para un daemon instalado con `npm install -g`. **Por defecto se actualiza sin preguntar y

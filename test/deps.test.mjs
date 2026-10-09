@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { installedDeps, watchDependencies } from '../src/deps.js'
+import { installedDeps, watchDependencies, printDependencyNotices } from '../src/deps.js'
 
 function service (deps, installed) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-'))
@@ -51,4 +51,21 @@ test('si no se pudo mirar, no dice nada (y no dice «al día»)', async () => {
   await new Promise((r) => setTimeout(r, 50))
   stop()
   assert.deepEqual(lines, [])
+})
+
+test('un comando: una línea por stderr por cada pilar atrasado, y cuenta cuántas', async () => {
+  const dir = service({ '@dotrino/identity': 'x', '@dotrino/vault': 'x' }, { '@dotrino/identity': '0.62.0', '@dotrino/vault': '0.82.0' })
+  const latest = { '@dotrino/identity': '0.109.0', '@dotrino/vault': '0.82.0' }
+  const fetchImpl = async (url) => {
+    const name = decodeURIComponent(String(url).split('/-/package/')[1].split('/dist-tags')[0])
+    return { ok: true, json: async () => ({ latest: latest[name] }) }
+  }
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-cache-'))
+  const out = []; const write = process.stderr.write
+  process.stderr.write = (chunk) => { out.push(String(chunk)); return true }
+  let n
+  try { n = await printDependencyNotices({ dir, fetchImpl, env: { XDG_CACHE_HOME: cache, HOME: cache } }) } finally { process.stderr.write = write }
+  assert.equal(n, 1)
+  assert.match(out.join(''), /@dotrino\/identity 0\.109\.0/)
+  assert.doesNotMatch(out.join(''), /@dotrino\/vault/)
 })
