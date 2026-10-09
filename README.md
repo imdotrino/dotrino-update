@@ -360,3 +360,7 @@ un tarball no). `./fetch` deja el archivo verificado y dice dónde.
 ## Licencia
 
 MIT
+
+## Documentación de uso
+
+Está en el wiki: <https://wiki.dotrino.com/desarrollo/versiones/>
