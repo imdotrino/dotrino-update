@@ -104,6 +104,23 @@ await printUpdateNotice({
 - Si no se pudo mirar, **la caché no se pisa**: apuntar «al día» cuando lo que pasó es que
   no había red deja una máquina convencida para siempre de que está actualizada.
 
+## En un servicio desplegado desde git (`@dotrino/update/deps`)
+
+Su código es siempre el de `main`; lo que se queda atrás son sus **dependencias**, que van
+con versión exacta y nadie sube si nadie se entera.
+
+```js
+import { watchDependencies } from '@dotrino/update/deps'
+
+// Un vigía por cada `@dotrino/*` de su package.json, contra la versión INSTALADA.
+const stop = watchDependencies({ dir: __dirname, name: 'geo' })
+// [update] geo: @dotrino/identity 0.109.0 is available (running 0.62.0): bump it in package.json
+```
+
+Solo mira y lo dice. Una dependencia declarada y sin instalar **lanza**
+(`code: 'deps-not-installed'`): es un despliegue a medias, no «al día». `installedDeps({ dir })`
+da la lista para una pantalla de estado. Desde CommonJS: `await import('@dotrino/update/deps')`.
+
 ## Actualizarse sola por npm (`@dotrino/update/npm`)
 
 Para un daemon instalado con `npm install -g`. **Por defecto se actualiza sin preguntar y
