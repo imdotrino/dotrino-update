@@ -125,6 +125,24 @@ Para un **comando** que corre desde un checkout (un bot de cron), al terminar la
 `await printDependencyNotices({ dir })` — una línea por stderr por cada pilar atrasado, con
 la caché de un día de `printUpdateNotice`.
 
+## Un servicio sin pilares: mirar el checkout (`@dotrino/update/checkout`)
+
+Si no usa ningún `@dotrino/*`, no tiene dependencias que se queden atrás: lo que se queda
+atrás es **el checkout**. Un webhook que falló, una carpeta copiada a mano, un remoto que
+apunta al repo de antes.
+
+```js
+import { watchCheckout } from '@dotrino/update/checkout'
+
+watchCheckout({ dir: __dirname, repo: 'imdotrino/dotrino-signer', name: 'signer' })
+// [update] signer: imdotrino/dotrino-signer@main is at 3f2a9c1 and this is running cd962aa: the deploy did not land
+// [update] signer: /srv/signer is not a git checkout: cannot tell which commit is running
+```
+
+`checkCheckout` contesta una de cuatro: al día, atrás, `not-a-checkout` o `could-not-check`.
+Ir por delante de la rama (una máquina de desarrollo) no es ir atrás. Un servicio que sí usa
+pilares puede llevar los dos vigías.
+
 ## Actualizarse sola por npm (`@dotrino/update/npm`)
 
 Para un daemon instalado con `npm install -g`. **Por defecto se actualiza sin preguntar y
