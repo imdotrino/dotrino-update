@@ -152,3 +152,16 @@ test('bajar y verificar: si la firma falla, se DICE dónde quedó el archivo sin
   assert.equal(r.ok, false)
   assert.ok(r.file, 'el archivo se dice, para poder mirarlo o borrarlo')
 })
+
+test('github con tagPrefix: la más alta de ESE producto, no la última del repo', async () => {
+  const rel = (tag_name, extra = {}) => ({ tag_name, html_url: `u/${tag_name}`, assets: [{ name: `${tag_name}.deb`, browser_download_url: `d/${tag_name}`, size: 1 }], ...extra })
+  let asked = ''
+  const fetchImpl = async (url) => { asked = url; return { ok: true, json: async () => [rel('agent-v0.38.0'), rel('desktop-v0.2.9'), rel('desktop-v0.2.45'), rel('desktop-v0.3.0', { prerelease: true }), rel('desktop-v9.0.0', { draft: true }), rel('desktop-vnope')] } }
+  const r = await latestVersion({ source: 'github', repo: 'imdotrino/dotrino-terminal', tagPrefix: 'desktop-v', fetchImpl })
+  assert.match(asked, /\/releases\?per_page=100$/)
+  assert.deepEqual([r.ok, r.version, r.assets[0].name], [true, '0.2.45', 'desktop-v0.2.45.deb'])
+  const none = await latestVersion({ source: 'github', repo: 'imdotrino/dotrino-terminal', tagPrefix: 'web-v', fetchImpl })
+  assert.equal(none.ok, false, 'sin releases de ese producto no se sabe: no es «al día»')
+  const bad = await latestVersion({ source: 'github', repo: 'x/y', tagPrefix: 'desktop-v', fetchImpl: ok({ message: 'rate limited' }) })
+  assert.equal(bad.ok, false)
+})

@@ -40,6 +40,11 @@ watchForUpdate({
 watchForUpdate({ current: VERSION, source: 'github', repo: 'imdotrino/dotrino-vault', onNewer })
 ```
 
+Un repo con varios productos etiqueta cada uno con su prefijo (`desktop-v1.2.3`,
+`agent-v1.2.3`). Con `tagPrefix: 'desktop-v'` se toma la release más alta de ese producto,
+no la última del repo.
+
+
 `checkForUpdate` contesta una de tres, y **nunca** confunde dos de ellas:
 
 ```js

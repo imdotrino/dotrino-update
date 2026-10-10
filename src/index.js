@@ -66,13 +66,15 @@ async function get (url, { fetchImpl, timeoutMs, headers = {}, product, version 
  * LA ÚLTIMA VERSIÓN PUBLICADA. Dos orígenes, porque el ecosistema se instala de dos formas:
  *
  *   · `github` — la pieza se baja como binario de un release (el vault: `.deb`, tarball).
+ *                Con `tagPrefix`, la release más alta cuyo tag empieza así (un repo con
+ *                varios productos: `desktop-v`, `agent-v`).
  *   · `npm`    — la pieza se corre desde el registro (el proxio, geo, reputation, los bots).
  *
  * Devuelve `{ ok: false, reason }` cuando no se pudo mirar, que **no** es «estás al día»:
  * quien lo enseñe tiene que poder decir cuál de las dos cosas pasó.
  */
 export async function latestVersion ({
-  source, repo, pkg, fetchImpl = fetch, timeoutMs = 10_000, product, version
+  source, repo, pkg, tagPrefix, fetchImpl = fetch, timeoutMs = 10_000, product, version
 } = {}) {
   const opts = { fetchImpl, timeoutMs, product, version }
   if (source === 'npm') {
@@ -86,10 +88,31 @@ export async function latestVersion ({
   }
   if (source === 'github') {
     if (!repo) return { ok: false, reason: 'latestVersion: `repo` is required with source "github"' }
-    const r = await get(`https://api.github.com/repos/${repo}/releases/latest`, { ...opts, headers: { accept: 'application/vnd.github+json' } })
-    if (!r.ok) return r
-    const v = String(r.body?.tag_name || '').replace(/^v/, '')
-    if (!valid(v)) return { ok: false, reason: `unreadable tag: ${r.body?.tag_name}` }
+    const headers = { accept: 'application/vnd.github+json' }
+    let rel
+    if (tagPrefix) {
+      // Un repo con VARIOS productos etiqueta cada uno con su prefijo (`desktop-v1.2.3`,
+      // `agent-v1.2.3`), y «la última release» del repo es la de cualquiera de ellos. Se
+      // mira la lista y se toma la más alta de ESTE producto.
+      const r = await get(`https://api.github.com/repos/${repo}/releases?per_page=100`, { ...opts, headers })
+      if (!r.ok) return r
+      if (!Array.isArray(r.body)) return { ok: false, reason: 'unreadable release list' }
+      for (const x of r.body) {
+        const tag = String(x?.tag_name || '')
+        if (x?.draft || x?.prerelease || !tag.startsWith(tagPrefix)) continue
+        const n = tag.slice(tagPrefix.length)
+        if (valid(n) && (!rel || isNewer(n, rel.v))) rel = { v: n, body: x }
+      }
+      if (!rel) return { ok: false, reason: `no release tagged ${tagPrefix}* in ${repo}` }
+    } else {
+      const r = await get(`https://api.github.com/repos/${repo}/releases/latest`, { ...opts, headers })
+      if (!r.ok) return r
+      const n = String(r.body?.tag_name || '').replace(/^v/, '')
+      if (!valid(n)) return { ok: false, reason: `unreadable tag: ${r.body?.tag_name}` }
+      rel = { v: n, body: r.body }
+    }
+    const r = rel
+    const v = rel.v
     const assets = (r.body.assets || []).map((a) => ({ name: a.name, url: a.browser_download_url, size: a.size }))
     return { ok: true, version: v, source: 'github', repo, assets, url: r.body.html_url }
   }
