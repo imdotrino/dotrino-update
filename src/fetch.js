@@ -7,7 +7,6 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
 
 /**
@@ -42,25 +41,47 @@ export async function download (asset, { fetchImpl = fetch, dir = null, product,
 /**
  * LO QUE SE BAJA SE COMPRUEBA, Y SI NO SE PUEDE COMPROBAR NO SE INSTALA.
  *
- * `gh attestation verify` contrasta el archivo contra lo que sigstore guarda de esa
- * compilación: lo ata a su commit y a su workflow. Es lo que hace que bajar un binario no
- * sea un acto de fe — y por eso los `release.yml` del ecosistema atestiguan sus artefactos.
+ * El archivo se contrasta contra la atestación de sigstore de su compilación: lo ata a su
+ * repo y a su workflow. Es lo que hace que bajar un binario no sea un acto de fe — y por eso
+ * los `release.yml` del ecosistema atestiguan sus artefactos.
  *
- * SIN INICIAR SESIÓN EN GITHUB (2026-09-24). `gh attestation verify --repo` a secas pide
- * `gh auth login` aunque el repo sea público, y una bóveda en un VPS no tiene por qué tener
- * una sesión de GitHub — la del VPS de Dotrino no la tenía, así que su actualización nunca
- * pudo instalar nada. La atestación de un repo público se lee de la API SIN credenciales
- * (`/repos/<repo>/attestations/sha256:<hash>`), y `gh` la verifica con `--bundle` sin
- * pedir sesión. La verificación es la misma: firma de sigstore, repo y workflow.
+ * SIN `gh` (dueño, 2026-10-13: «¿por qué depende de GitHub CLI?»). Antes verificaba
+ * `gh attestation verify`, y una máquina con un `gh` anterior a la 2.49 —el de casi cualquier
+ * distribución— o sin `gh` no podía actualizar nada. Ahora la firma se comprueba aquí, con la
+ * librería de sigstore (`sigstore`, la misma que usa npm): cadena del certificado, registro de
+ * transparencia y firma del sobre. Es JavaScript puro.
  *
- * Sin `gh`, o con uno que no sabe verificar (anterior a `attestation`), no hay con qué
- * comprobar. Entonces se PARA y se dice cómo arreglarlo; no se instala «porque la URL era la
+ * `sigstore` NO es dependencia del pilar: lo instala la pieza que baja binarios (el agente de
+ * terminal, la bóveda), para que las demás no carguen con sus ~40 paquetes. Sin ella no hay
+ * con qué comprobar: se PARA y se dice (`NO_VERIFIER`); no se instala «porque la URL era la
  * buena», que es justo lo que cree quien ya está siendo atacado.
+ *
+ * SIN INICIAR SESIÓN EN GITHUB: la atestación de un repo público se lee de la API sin
+ * credenciales (`/repos/<repo>/attestations/sha256:<hash>`).
+ *
+ * Qué se comprueba, en orden:
+ *   1. GitHub tiene una atestación para el sha256 de ESTE archivo.
+ *   2. Su firma es válida y la emitió GitHub Actions (`ISSUER`).
+ *   3. Quien firmó es un workflow de `repo` (el SAN del certificado).
+ *   4. Lo firmado es una procedencia de compilación que nombra ESTE sha256.
  */
-export async function verifyArtifact (file, { repo, run = execFileSync, fetchImpl = fetch, gh = findGh() } = {}) {
+const ISSUER = 'https://token.actions.githubusercontent.com'
+const PROVENANCE = /^https:\/\/slsa\.dev\/provenance\//
+
+/** La librería de sigstore, si la pieza la instaló. */
+async function loadSigstore () {
+  try { return await import('sigstore') } catch (e) {
+    if (e?.code === 'ERR_MODULE_NOT_FOUND') return null
+    throw e
+  }
+}
+
+export async function verifyArtifact (file, { repo, fetchImpl = fetch, sigstore = undefined } = {}) {
   if (!repo) return { ok: false, reason: 'verifyArtifact: `repo` is required' }
-  const noGh = ghReady({ run, gh, hint: `gh attestation verify <file> --repo ${repo}` })
-  if (noGh) return noGh
+  const lib = sigstore === undefined ? await loadSigstore() : sigstore
+  if (!lib) {
+    return { ok: false, code: 'NO_VERIFIER', reason: 'the `sigstore` package is not installed, so the download cannot be verified. Reinstall this program' }
+  }
   // La atestación de ESTE archivo, por su hash, sin credenciales.
   const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
   let bundles
@@ -76,59 +97,28 @@ export async function verifyArtifact (file, { repo, run = execFileSync, fetchImp
   if (!bundles.length) {
     return { ok: false, code: 'NO_ATTESTATION', reason: `GitHub has no attestation for this file (sha256 ${hash}): it was not built by the release of ${repo}` }
   }
-  const bundleFile = path.join(path.dirname(file), 'attestation.jsonl')
-  fs.writeFileSync(bundleFile, bundles.map((b) => JSON.stringify(b)).join('\n') + '\n')
-  try {
-    const out = run(gh, ['attestation', 'verify', file, '--repo', repo, '--bundle', bundleFile], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      // Sin sesión a propósito: si hubiera una, no se usa ni se necesita.
-      env: { ...process.env, GH_TOKEN: '', GITHUB_TOKEN: '' }
-    })
-    return { ok: true, out: String(out || '').trim() }
-  } catch (e) {
-    return { ok: false, code: 'BAD_SIGNATURE', reason: `the signature does not check out: ${String(e.stderr || e.message).trim().slice(0, 300)}` }
+  // Basta UNA atestación que cuadre entera; si ninguna, se dice por qué falló la última.
+  let why = ''
+  for (const bundle of bundles) {
+    try {
+      const signer = await lib.verify(bundle, { certificateIssuer: ISSUER })
+      const who = String(signer?.identity?.subjectAlternativeName || '')
+      if (signer?.identity?.extensions?.issuer !== ISSUER) throw new Error(`signed by an unexpected issuer (${signer?.identity?.extensions?.issuer})`)
+      if (!who.startsWith(`https://github.com/${repo}/.github/workflows/`)) throw new Error(`signed by ${who || 'nobody'}, not by a workflow of ${repo}`)
+      const env = bundle.dsseEnvelope
+      if (env?.payloadType !== 'application/vnd.in-toto+json') throw new Error('the attestation is not an in-toto statement')
+      const statement = JSON.parse(Buffer.from(env.payload, 'base64').toString('utf8'))
+      if (!PROVENANCE.test(String(statement.predicateType))) throw new Error(`not a build provenance (${statement.predicateType})`)
+      if (!(statement.subject || []).some((s) => s?.digest?.sha256 === hash)) throw new Error('the attestation is for another file')
+      return { ok: true, out: `verified: built by ${who}` }
+    } catch (e) { why = e.message }
   }
-}
-
-/**
- * El `gh` de `~/.local/bin` si existe; si no, el del PATH.
- *
- * El de `~/.local/bin` GANA aunque haya otro en el PATH, y no es un repliegue: es el que
- * instala el usuario sin permisos de administrador precisamente para poder verificar, y el del
- * sistema suele ser viejo (anterior a `gh attestation`). Además un servicio de systemd no
- * tiene esa carpeta en su PATH: el 2026-09-24 la bóveda de la PC del dueño encontraba
- * `/usr/bin/gh` 2.46 y no se actualizaba, con un `gh` bueno instalado al lado.
- */
-export function findGh () {
-  const local = path.join(os.homedir(), '.local', 'bin', 'gh')
-  return fs.existsSync(local) ? local : 'gh'
-}
-
-/**
- * ¿Hay un `gh` que sepa verificar atestaciones? `null` si sí; si no, el fallo ya armado
- * (`NO_GH` / `GH_TOO_OLD`). Lo comparten el binario (`verifyArtifact`) y el paquete de npm
- * (`./npm`): las dos verificaciones se apoyan en la misma herramienta.
- */
-export function ghReady ({ run = execFileSync, gh = findGh(), hint = '' } = {}) {
-  const byHand = hint ? `, or check it by hand: ${hint}` : ''
-  try { run(gh, ['--version'], { stdio: 'ignore' }) } catch (_) {
-    return {
-      ok: false, code: 'NO_GH',
-      reason: `gh is not installed, so the download cannot be verified. Install GitHub CLI (a user binary in ~/.local/bin is enough; no login needed)${byHand}`
-    }
-  }
-  try { run(gh, ['attestation', 'verify', '--help'], { stdio: 'ignore' }) } catch (_) {
-    return {
-      ok: false, code: 'GH_TOO_OLD',
-      reason: `this gh cannot verify attestations (it predates \`gh attestation\`, 2.49). Update GitHub CLI${byHand}`
-    }
-  }
-  return null
+  return { ok: false, code: 'BAD_SIGNATURE', reason: `the signature does not check out: ${String(why).trim().slice(0, 300)}` }
 }
 
 /** Bajar y verificar, que es lo que casi siempre se quiere junto. No instala: eso es del producto. */
 export async function fetchVerified (asset, { repo, ...rest } = {}) {
   const file = await download(asset, rest)
-  const v = await verifyArtifact(file, { repo, run: rest.run, fetchImpl: rest.fetchImpl })
+  const v = await verifyArtifact(file, { repo, fetchImpl: rest.fetchImpl, sigstore: rest.sigstore })
   return v.ok ? { ok: true, file, out: v.out } : { ...v, file }
 }

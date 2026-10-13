@@ -1,6 +1,6 @@
 {
   "name": "@dotrino/update",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Enterarse de que hay versión nueva, traerla verificada e instalarla sola. Para los daemons, servicios y CLIs del ecosistema Dotrino.",
   "type": "module",
   "main": "src/index.js",
@@ -45,6 +45,14 @@
     "provenance",
     "sigstore"
   ],
+  "peerDependencies": {
+    "sigstore": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "sigstore": {
+      "optional": true
+    }
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

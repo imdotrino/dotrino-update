@@ -69,9 +69,16 @@ const v = await fetchVerified(asset, { repo: 'imdotrino/dotrino-vault' })
 if (!v.ok) { console.error(v.reason); process.exit(1) }   // NO se instala nada
 ```
 
-La verificación es `gh attestation verify` contra la atestación de sigstore que el
-`release.yml` deja al construir: ata el archivo a su commit y a su workflow. **Sin `gh` no
-hay con qué comprobar, así que se para y se dice** — no se instala «porque la URL era la
+La verificación contrasta el archivo con la atestación de sigstore que el `release.yml` deja
+al construir: firma válida de GitHub Actions, un workflow de ese repo y el sha256 de este
+archivo. Se hace aquí, con la librería [`sigstore`](https://www.npmjs.com/package/sigstore)
+(JavaScript puro): **no hace falta `gh`** ni iniciar sesión en GitHub (dueño, 2026-10-13; antes
+se llamaba a `gh attestation verify` y una máquina con un `gh` anterior a la 2.49 no podía
+actualizar).
+
+`sigstore` **no es dependencia de este paquete**: la instala la pieza que baja binarios
+(`npm i sigstore`), para que las demás no carguen con sus ~40 paquetes. **Sin ella no hay con
+qué comprobar, así que se para y se dice** (`NO_VERIFIER`) — no se instala «porque la URL era la
 buena», que es exactamente lo que cree quien ya está siendo atacado.
 
 Para que esto funcione, el `release.yml` del producto tiene que atestiguar sus artefactos:

@@ -12,6 +12,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { isNewer, latestVersion, checkForUpdate, watchForUpdate } from '../src/index.js'
+import crypto from 'node:crypto'
 import { pickAsset, verifyArtifact, fetchVerified } from '../src/fetch.js'
 
 const ok = (body) => async () => ({ ok: true, json: async () => body })
@@ -98,56 +99,83 @@ test('el archivo se elige por máquina, en orden de preferencia', () => {
 const okFetch = (bundles) => async () => ({ ok: true, json: async () => ({ attestations: bundles.map((b) => ({ bundle: b })) }) })
 const tmpFile = () => { const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'upd-')), 'x.deb'); fs.writeFileSync(f, 'bytes'); return f }
 
-test('sin gh no se verifica, y entonces no se sigue', async () => {
-  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run: () => { throw new Error('not found') } })
-  assert.equal(r.ok, false)
-  assert.equal(r.code, 'NO_GH')
-  assert.match(r.reason, /gh attestation verify/, 'y dice cómo comprobarlo a mano')
+const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex')
+/** Una atestación como la de GitHub: un sobre in-toto de procedencia que nombra `hash`. */
+const bundleFor = (hash, { predicateType = 'https://slsa.dev/provenance/v1', payloadType = 'application/vnd.in-toto+json' } = {}) => ({
+  dsseEnvelope: { payloadType, payload: Buffer.from(JSON.stringify({ predicateType, subject: [{ name: 'x.deb', digest: { sha256: hash } }] })).toString('base64') }
 })
+/** La librería de sigstore, de mentira: da por buena la firma y dice quién firmó. */
+const signedBy = (san, issuer = 'https://token.actions.githubusercontent.com') => ({
+  verify: async () => ({ identity: { subjectAlternativeName: san, extensions: { issuer } } })
+})
+const WORKFLOW = 'https://github.com/a/b/.github/workflows/release.yml@refs/tags/v1.0.0'
 
-test('un gh que no sabe verificar (anterior a `attestation`) se dice aparte', async () => {
-  const run = (cmd, args) => { if (args[0] === '--version') return ''; throw new Error('unknown command "attestation"') }
-  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run })
-  assert.equal(r.code, 'GH_TOO_OLD')
+test('sin la librería de sigstore no se verifica, y entonces no se sigue', async () => {
+  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', sigstore: null })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'NO_VERIFIER')
 })
 
 test('sin atestación para ESTE archivo no se instala', async () => {
-  const run = () => ''
-  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run, fetchImpl: okFetch([]) })
+  const sigstore = signedBy(WORKFLOW)
+  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', sigstore, fetchImpl: okFetch([]) })
   assert.equal(r.code, 'NO_ATTESTATION')
-  const caida = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run, fetchImpl: async () => ({ ok: false, status: 503 }) })
+  const caida = await verifyArtifact(tmpFile(), { repo: 'a/b', sigstore, fetchImpl: async () => ({ ok: false, status: 503 }) })
   assert.equal(caida.code, 'NO_ATTESTATION', 'que GitHub no conteste tampoco es «está bien»')
 })
 
-test('se verifica SIN sesión: la atestación va por --bundle y el token se vacía', async () => {
+test('se verifica SIN sesión y sin gh: firma de GitHub Actions, workflow del repo y el hash de este archivo', async () => {
   const f = tmpFile()
-  let llamada = null
-  const run = (cmd, args, opts) => { if (args[1] === 'verify' && args[2] === f) llamada = { args, opts }; return 'ok' }
   let pedida = null
-  const fetchImpl = async (url, o) => { pedida = { url, o }; return okFetch([{ mediaType: 'x' }])() }
-  const r = await verifyArtifact(f, { repo: 'a/b', gh: 'gh', run, fetchImpl })
+  let pasado = null
+  const fetchImpl = async (url, o) => { pedida = { url, o }; return okFetch([bundleFor(sha(f))])() }
+  const sigstore = { verify: async (bundle, opts) => { pasado = { bundle, opts }; return signedBy(WORKFLOW).verify() } }
+  const r = await verifyArtifact(f, { repo: 'a/b', sigstore, fetchImpl })
   assert.equal(r.ok, true)
   assert.match(pedida.url, /^https:\/\/api\.github\.com\/repos\/a\/b\/attestations\/sha256:[0-9a-f]{64}$/)
   assert.equal(pedida.o.headers.authorization, undefined, 'sin credenciales')
-  const i = llamada.args.indexOf('--bundle')
-  assert.ok(i > 0, 'con --bundle')
-  assert.equal(fs.readFileSync(llamada.args[i + 1], 'utf8').trim(), JSON.stringify({ mediaType: 'x' }))
-  assert.equal(llamada.opts.env.GH_TOKEN, '')
+  assert.equal(pasado.opts.certificateIssuer, 'https://token.actions.githubusercontent.com')
+  assert.match(r.out, /workflows\/release\.yml/)
 })
 
 test('una firma que no cuadra se dice con su código, no se traga', async () => {
-  const run = (cmd, args) => { if (args[1] === 'verify' && args.length > 3) { const e = new Error('x'); e.stderr = 'verifying with issuer "sigstore.dev"'; throw e } return '' }
-  const r = await verifyArtifact(tmpFile(), { repo: 'a/b', gh: 'gh', run, fetchImpl: okFetch([{}]) })
+  const f = tmpFile()
+  const mala = { verify: async () => { throw new Error('signature verification failed') } }
+  const r = await verifyArtifact(f, { repo: 'a/b', sigstore: mala, fetchImpl: okFetch([bundleFor(sha(f))]) })
   assert.equal(r.code, 'BAD_SIGNATURE')
-  assert.match(r.reason, /sigstore/)
+  assert.match(r.reason, /signature verification failed/)
+})
+
+test('una firma válida que no es de ESTE repo, de este archivo o de una compilación no vale', async () => {
+  const f = tmpFile()
+  const con = (sigstore, bundle) => verifyArtifact(f, { repo: 'a/b', sigstore, fetchImpl: okFetch([bundle]) })
+  // Firmó el workflow de otro repo (uno cuyo nombre empieza igual incluido).
+  for (const otro of ['https://github.com/x/y/.github/workflows/release.yml@refs/tags/v1', 'https://github.com/a/bb/.github/workflows/release.yml@refs/tags/v1', '']) {
+    const r = await con(signedBy(otro), bundleFor(sha(f)))
+    assert.equal(r.code, 'BAD_SIGNATURE', otro)
+    assert.match(r.reason, /not by a workflow of a\/b/)
+  }
+  // No la emitió GitHub Actions.
+  assert.equal((await con(signedBy(WORKFLOW, 'https://accounts.google.com'), bundleFor(sha(f)))).code, 'BAD_SIGNATURE')
+  // La atestación es de otro archivo.
+  assert.match((await con(signedBy(WORKFLOW), bundleFor('0'.repeat(64)))).reason, /another file/)
+  // No es una procedencia de compilación.
+  assert.match((await con(signedBy(WORKFLOW), bundleFor(sha(f), { predicateType: 'https://spdx.dev/Document' }))).reason, /not a build provenance/)
+  assert.match((await con(signedBy(WORKFLOW), bundleFor(sha(f), { payloadType: 'text/plain' }))).reason, /in-toto/)
+})
+
+test('con varias atestaciones basta una que cuadre entera', async () => {
+  const f = tmpFile()
+  const r = await verifyArtifact(f, { repo: 'a/b', sigstore: signedBy(WORKFLOW), fetchImpl: okFetch([bundleFor('0'.repeat(64)), bundleFor(sha(f))]) })
+  assert.equal(r.ok, true)
 })
 
 test('bajar y verificar: si la firma falla, se DICE dónde quedó el archivo sin instalarlo', async () => {
   const asset = { name: 'x.deb', url: 'https://u' }
   const r = await fetchVerified(asset, {
     repo: 'a/b',
-    fetchImpl: async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode('bytes').buffer }),
-    run: () => { throw new Error('nope') }
+    sigstore: null,
+    fetchImpl: async () => ({ ok: true, arrayBuffer: async () => new TextEncoder().encode('bytes').buffer })
   })
   assert.equal(r.ok, false)
   assert.ok(r.file, 'el archivo se dice, para poder mirarlo o borrarlo')
