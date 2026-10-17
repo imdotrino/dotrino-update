@@ -10,6 +10,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { CHECK_EVERY_MS } from './index.js'
+import { getJson } from './http.js'
 
 const short = (sha) => String(sha).slice(0, 7)
 const git = (run, dir, args) => String(run('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
@@ -30,18 +31,11 @@ export async function checkCheckout ({
   try { running = git(run, dir, ['rev-parse', 'HEAD']) } catch (_) {
     return { ok: false, code: 'not-a-checkout', reason: `${dir} is not a git checkout` }
   }
-  const ac = new AbortController()
-  const t = setTimeout(() => ac.abort(), timeoutMs)
-  let latest
-  try {
-    const r = await fetchImpl(`https://api.github.com/repos/${repo}/commits/${encodeURIComponent(branch)}`, {
-      signal: ac.signal, headers: { accept: 'application/vnd.github+json', 'user-agent': 'dotrino-update (+https://dotrino.com)' }
-    })
-    if (!r.ok) return { ok: false, code: 'could-not-check', reason: `api.github.com answered ${r.status}` }
-    latest = (await r.json())?.sha
-  } catch (e) {
-    return { ok: false, code: 'could-not-check', reason: e.name === 'AbortError' ? 'timed out' : e.message }
-  } finally { clearTimeout(t) }
+  const r = await getJson(`https://api.github.com/repos/${repo}/commits/${encodeURIComponent(branch)}`, {
+    fetchImpl, timeoutMs, headers: { accept: 'application/vnd.github+json', 'user-agent': 'dotrino-update (+https://dotrino.com)' }
+  })
+  if (!r.ok) return { ok: false, code: 'could-not-check', reason: r.reason }
+  const latest = r.body?.sha
   if (!/^[0-9a-f]{40}$/.test(String(latest))) return { ok: false, code: 'could-not-check', reason: `unreadable commit: ${latest}` }
   if (latest === running) return { ok: true, behind: false, running, latest }
   // Distinto no es «atrás»: en una máquina de desarrollo el checkout va por DELANTE. Atrás es

@@ -34,6 +34,8 @@
  * confunde.
  */
 
+import { getJson } from './http.js'
+
 /** `0.123.0` → `[0,123,0]`. Lo que no sean tres números no compite. */
 const parts = (v) => String(v || '').trim().replace(/^v/, '').split('.').map((n) => parseInt(n, 10))
 const valid = (v) => parts(v).length === 3 && parts(v).every((n) => Number.isFinite(n))
@@ -50,17 +52,8 @@ export function isNewer (a, b) {
 
 const ua = (product, version) => `${product || 'dotrino'}/${version || '0'} (+https://dotrino.com)`
 
-async function get (url, { fetchImpl, timeoutMs, headers = {}, product, version }) {
-  const ac = new AbortController()
-  const t = setTimeout(() => ac.abort(), timeoutMs)
-  try {
-    const r = await fetchImpl(url, { signal: ac.signal, headers: { 'user-agent': ua(product, version), ...headers } })
-    if (!r.ok) return { ok: false, reason: `${new URL(url).host} answered ${r.status}` }
-    return { ok: true, body: await r.json() }
-  } catch (e) {
-    return { ok: false, reason: e.name === 'AbortError' ? 'timed out' : e.message }
-  } finally { clearTimeout(t) }
-}
+const get = (url, { fetchImpl, timeoutMs, headers = {}, product, version }) =>
+  getJson(url, { fetchImpl, timeoutMs, headers: { 'user-agent': ua(product, version), ...headers } })
 
 /**
  * LA ÚLTIMA VERSIÓN PUBLICADA. Dos orígenes, porque el ecosistema se instala de dos formas:

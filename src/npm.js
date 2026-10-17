@@ -41,6 +41,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { latestVersion, isNewer, CHECK_EVERY_MS } from './index.js'
 import { integrityOf, INTEGRITY_FILE } from './integrity.js'
+import { getJson } from './http.js'
 
 const REGISTRY = 'https://registry.npmjs.org'
 const GITHUB = 'https://github.com'
@@ -134,16 +135,10 @@ function workDir ({ home = os.homedir(), env = process.env } = {}) {
 }
 const rm = (dir) => { try { fs.rmSync(dir, { recursive: true, force: true }) } catch (_) {} }
 
-async function getJson (url, { fetchImpl, timeoutMs = 20_000 }) {
-  const ac = new AbortController()
-  const t = setTimeout(() => ac.abort(), timeoutMs)
-  try {
-    const r = await fetchImpl(url, { signal: ac.signal, headers: { 'user-agent': 'dotrino-update' } })
-    if (!r.ok) throw new Error(`${new URL(url).host} answered ${r.status}`)
-    return await r.json()
-  } catch (e) {
-    throw new Error(e.name === 'AbortError' ? 'timed out' : e.message)
-  } finally { clearTimeout(t) }
+async function getJsonOrThrow (url, { fetchImpl, timeoutMs = 20_000 }) {
+  const r = await getJson(url, { fetchImpl, timeoutMs, headers: { 'user-agent': 'dotrino-update' } })
+  if (!r.ok) throw new Error(r.reason)
+  return r.body
 }
 
 /**
@@ -212,7 +207,7 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
   // 2. El archivo, de npm.
   let tarball
   try {
-    const meta = await getJson(`${REGISTRY}/${regName(pkg)}/${version}`, { fetchImpl })
+    const meta = await getJsonOrThrow(`${REGISTRY}/${regName(pkg)}/${version}`, { fetchImpl })
     tarball = meta?.dist?.tarball
     if (typeof tarball !== 'string' || new URL(tarball).origin !== REGISTRY) throw new Error(`unexpected tarball location: ${tarball}`)
   } catch (e) { return fail('REGISTRY_UNREACHABLE', `could not read ${pkg}@${version} from the registry: ${e.message}`) }
