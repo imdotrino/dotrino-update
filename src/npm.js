@@ -698,7 +698,7 @@ export function watchSelfUpdateNpm ({
   // ¿ME ACABO DE ACTUALIZAR? Se mira una vez, al arrancar, y no frena lo demás. El marcador
   // solo se borra cuando el aviso SALIÓ (o cuando el dueño apagó los avisos): si avisar
   // falla, se queda para el próximo arranque.
-  const avisar = async () => {
+  const announce = async () => {
     if (!onUpdated || !opts.dir) return
     try {
       const m = peekUpdateMarker({ dir: opts.dir, current: opts.current })
@@ -709,8 +709,8 @@ export function watchSelfUpdateNpm ({
       log(`[update] could not tell that ${opts.pkg} updated (${e?.message || e}) · it will try again on the next start`)
     }
   }
-  avisar()
-  const mirar = async () => {
+  announce()
+  const check = async () => {
     if (stopped || busy) return
     busy = true
     try {
@@ -720,14 +720,14 @@ export function watchSelfUpdateNpm ({
         if (r.reason !== lastFail) log(`[update] could not check for a new version of ${opts.pkg}: ${r.reason} · trying again in ${Math.round(retryMs / 60_000)} min`)
         lastFail = r.reason
         clearTimeout(retry)
-        retry = setTimeout(mirar, retryMs)
+        retry = setTimeout(check, retryMs)
         retry.unref?.()
       } else lastFail = null
       try { onResult?.(r) } catch (_) {}
     } finally { busy = false }
   }
-  mirar()
-  const t = setInterval(mirar, everyMs)
+  check()
+  const t = setInterval(check, everyMs)
   t.unref?.()
   return () => { stopped = true; clearInterval(t); clearTimeout(retry) }
 }

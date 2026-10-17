@@ -30,8 +30,8 @@ export function cacheFile (key, { home = os.homedir(), env = process.env } = {})
   return path.join(base, 'dotrino', 'update', `${String(key).replace(/[^\w.@-]/g, '_')}.json`)
 }
 
-const leer = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch (_) { return null } }
-const escribir = (f, v) => {
+const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch (_) { return null } }
+const writeJson = (f, v) => {
   try {
     fs.mkdirSync(path.dirname(f), { recursive: true })
     fs.writeFileSync(f, JSON.stringify(v))
@@ -53,14 +53,14 @@ export async function updateNotice ({
   if (env.DOTRINO_NO_UPDATE_NOTICE === '1') return null
   const key = pkg || repo || product
   const file = cacheFile(key, { env })
-  const visto = leer(file)
+  const seen = readJson(file)
 
-  let latest = visto?.version
-  if (!visto || (now - (visto.checkedAt || 0)) > everyMs) {
+  let latest = seen?.version
+  if (!seen || (now - (seen.checkedAt || 0)) > everyMs) {
     const r = await checkForUpdate({ current, source, pkg, repo, timeoutMs, ...rest })
     // No se pudo mirar: se deja la caché como estaba. Lo que NO se hace es apuntar «al día»,
     // que convertiría una red caída en una máquina que se cree actualizada para siempre.
-    if (r.ok) { latest = r.version; escribir(file, { version: r.version, checkedAt: now }) }
+    if (r.ok) { latest = r.version; writeJson(file, { version: r.version, checkedAt: now }) }
   }
 
   if (!latest || !isNewer(latest, current)) return null
@@ -75,8 +75,8 @@ export async function updateNotice ({
  */
 export async function printUpdateNotice (opts = {}) {
   try {
-    const linea = await updateNotice(opts)
-    if (linea) process.stderr.write(`\n${linea}${opts.how ? ` · ${opts.how}` : ''}\n`)
-    return !!linea
+    const line = await updateNotice(opts)
+    if (line) process.stderr.write(`\n${line}${opts.how ? ` · ${opts.how}` : ''}\n`)
+    return !!line
   } catch (_) { return false }
 }

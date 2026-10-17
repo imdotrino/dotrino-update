@@ -140,13 +140,13 @@ export const CHECK_EVERY_MS = 24 * 60 * 60_000
  */
 export function watchForUpdate ({ onNewer, everyMs = CHECK_EVERY_MS, ...rest } = {}) {
   let stopped = false
-  const mirar = async () => {
+  const check = async () => {
     const r = await checkForUpdate(rest)
     if (stopped || !r.ok || !r.newer) return
     try { onNewer?.(r) } catch (_) {}
   }
-  mirar()
-  const t = setInterval(mirar, everyMs)
+  check()
+  const t = setInterval(check, everyMs)
   t.unref?.()
   return () => { stopped = true; clearInterval(t) }
 }

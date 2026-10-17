@@ -16,7 +16,7 @@ import crypto from 'node:crypto'
 import { pickAsset, verifyArtifact, fetchVerified } from '../src/fetch.js'
 
 const ok = (body) => async () => ({ ok: true, json: async () => body })
-const falla = (status) => async () => ({ ok: false, status })
+const failing = (status) => async () => ({ ok: false, status })
 
 test('comparar versiones: tres números, y 99 no es mayor que 100', () => {
   assert.equal(isNewer('0.123.0', '0.121.0'), true)
@@ -46,38 +46,38 @@ test('github: la última sale de la etiqueta, con sus archivos', async () => {
  * saber. Confundirlas es cómo un replicador pasa quince días atrás pareciendo sano.
  */
 test('no se pudo mirar NO es estar al día', async () => {
-  const caida = await checkForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: falla(503) })
-  assert.equal(caida.ok, false)
-  assert.equal('newer' in caida, false, 'sin respuesta no se opina sobre si hay versión nueva')
-  assert.match(caida.reason, /503/)
+  const down = await checkForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: failing(503) })
+  assert.equal(down.ok, false)
+  assert.equal('newer' in down, false, 'sin respuesta no se opina sobre si hay versión nueva')
+  assert.match(down.reason, /503/)
 
-  const alDia = await checkForUpdate({ current: '0.2.0', source: 'npm', pkg: 'x', fetchImpl: ok({ latest: '0.2.0' }) })
-  assert.deepEqual([alDia.ok, alDia.newer], [true, false])
+  const upToDate = await checkForUpdate({ current: '0.2.0', source: 'npm', pkg: 'x', fetchImpl: ok({ latest: '0.2.0' }) })
+  assert.deepEqual([upToDate.ok, upToDate.newer], [true, false])
 
   const hay = await checkForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: ok({ latest: '0.2.0' }) })
   assert.deepEqual([hay.ok, hay.newer, hay.version], [true, true, '0.2.0'])
 })
 
 test('el vigía solo habla cuando hay algo que decir, y nunca lanza', async () => {
-  const dichos = []
-  let parar = watchForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: ok({ latest: '0.2.0' }), onNewer: (r) => dichos.push(r.version) })
+  const told = []
+  let stop = watchForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: ok({ latest: '0.2.0' }), onNewer: (r) => told.push(r.version) })
   await new Promise((r) => setTimeout(r, 30))
-  parar()
-  assert.deepEqual(dichos, ['0.2.0'])
+  stop()
+  assert.deepEqual(told, ['0.2.0'])
 
   // Al día y caído: en los dos casos, silencio.
-  for (const f of [ok({ latest: '0.1.0' }), falla(500)]) {
-    const otros = []
-    parar = watchForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: f, onNewer: (r) => otros.push(r) })
+  for (const f of [ok({ latest: '0.1.0' }), failing(500)]) {
+    const others = []
+    stop = watchForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: f, onNewer: (r) => others.push(r) })
     await new Promise((r) => setTimeout(r, 30))
-    parar()
-    assert.deepEqual(otros, [])
+    stop()
+    assert.deepEqual(others, [])
   }
 
   // Un `onNewer` que revienta no tumba al que lo llamó: esto es mantenimiento de fondo.
-  parar = watchForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: ok({ latest: '0.9.0' }), onNewer: () => { throw new Error('boom') } })
+  stop = watchForUpdate({ current: '0.1.0', source: 'npm', pkg: 'x', fetchImpl: ok({ latest: '0.9.0' }), onNewer: () => { throw new Error('boom') } })
   await new Promise((r) => setTimeout(r, 30))
-  parar()
+  stop()
 })
 
 test('el archivo se elige por máquina, en orden de preferencia', () => {
@@ -120,48 +120,48 @@ test('sin atestación para ESTE archivo no se instala', async () => {
   const sigstore = signedBy(WORKFLOW)
   const r = await verifyArtifact(tmpFile(), { repo: 'a/b', sigstore, fetchImpl: okFetch([]) })
   assert.equal(r.code, 'NO_ATTESTATION')
-  const caida = await verifyArtifact(tmpFile(), { repo: 'a/b', sigstore, fetchImpl: async () => ({ ok: false, status: 503 }) })
-  assert.equal(caida.code, 'NO_ATTESTATION', 'que GitHub no conteste tampoco es «está bien»')
+  const down = await verifyArtifact(tmpFile(), { repo: 'a/b', sigstore, fetchImpl: async () => ({ ok: false, status: 503 }) })
+  assert.equal(down.code, 'NO_ATTESTATION', 'que GitHub no conteste tampoco es «está bien»')
 })
 
 test('se verifica SIN sesión y sin gh: firma de GitHub Actions, workflow del repo y el hash de este archivo', async () => {
   const f = tmpFile()
-  let pedida = null
-  let pasado = null
-  const fetchImpl = async (url, o) => { pedida = { url, o }; return okFetch([bundleFor(sha(f))])() }
-  const sigstore = { verify: async (bundle, opts) => { pasado = { bundle, opts }; return signedBy(WORKFLOW).verify() } }
+  let requested = null
+  let passed = null
+  const fetchImpl = async (url, o) => { requested = { url, o }; return okFetch([bundleFor(sha(f))])() }
+  const sigstore = { verify: async (bundle, opts) => { passed = { bundle, opts }; return signedBy(WORKFLOW).verify() } }
   const r = await verifyArtifact(f, { repo: 'a/b', sigstore, fetchImpl })
   assert.equal(r.ok, true)
-  assert.match(pedida.url, /^https:\/\/api\.github\.com\/repos\/a\/b\/attestations\/sha256:[0-9a-f]{64}$/)
-  assert.equal(pedida.o.headers.authorization, undefined, 'sin credenciales')
-  assert.equal(pasado.opts.certificateIssuer, 'https://token.actions.githubusercontent.com')
+  assert.match(requested.url, /^https:\/\/api\.github\.com\/repos\/a\/b\/attestations\/sha256:[0-9a-f]{64}$/)
+  assert.equal(requested.o.headers.authorization, undefined, 'sin credenciales')
+  assert.equal(passed.opts.certificateIssuer, 'https://token.actions.githubusercontent.com')
   assert.match(r.out, /workflows\/release\.yml/)
 })
 
 test('una firma que no cuadra se dice con su código, no se traga', async () => {
   const f = tmpFile()
-  const mala = { verify: async () => { throw new Error('signature verification failed') } }
-  const r = await verifyArtifact(f, { repo: 'a/b', sigstore: mala, fetchImpl: okFetch([bundleFor(sha(f))]) })
+  const bad = { verify: async () => { throw new Error('signature verification failed') } }
+  const r = await verifyArtifact(f, { repo: 'a/b', sigstore: bad, fetchImpl: okFetch([bundleFor(sha(f))]) })
   assert.equal(r.code, 'BAD_SIGNATURE')
   assert.match(r.reason, /signature verification failed/)
 })
 
 test('una firma válida que no es de ESTE repo, de este archivo o de una compilación no vale', async () => {
   const f = tmpFile()
-  const con = (sigstore, bundle) => verifyArtifact(f, { repo: 'a/b', sigstore, fetchImpl: okFetch([bundle]) })
+  const verifyWith = (sigstore, bundle) => verifyArtifact(f, { repo: 'a/b', sigstore, fetchImpl: okFetch([bundle]) })
   // Firmó el workflow de otro repo (uno cuyo nombre empieza igual incluido).
-  for (const otro of ['https://github.com/x/y/.github/workflows/release.yml@refs/tags/v1', 'https://github.com/a/bb/.github/workflows/release.yml@refs/tags/v1', '']) {
-    const r = await con(signedBy(otro), bundleFor(sha(f)))
-    assert.equal(r.code, 'BAD_SIGNATURE', otro)
+  for (const other of ['https://github.com/x/y/.github/workflows/release.yml@refs/tags/v1', 'https://github.com/a/bb/.github/workflows/release.yml@refs/tags/v1', '']) {
+    const r = await verifyWith(signedBy(other), bundleFor(sha(f)))
+    assert.equal(r.code, 'BAD_SIGNATURE', other)
     assert.match(r.reason, /not by a workflow of a\/b/)
   }
   // No la emitió GitHub Actions.
-  assert.equal((await con(signedBy(WORKFLOW, 'https://accounts.google.com'), bundleFor(sha(f)))).code, 'BAD_SIGNATURE')
+  assert.equal((await verifyWith(signedBy(WORKFLOW, 'https://accounts.google.com'), bundleFor(sha(f)))).code, 'BAD_SIGNATURE')
   // La atestación es de otro archivo.
-  assert.match((await con(signedBy(WORKFLOW), bundleFor('0'.repeat(64)))).reason, /another file/)
+  assert.match((await verifyWith(signedBy(WORKFLOW), bundleFor('0'.repeat(64)))).reason, /another file/)
   // No es una procedencia de compilación.
-  assert.match((await con(signedBy(WORKFLOW), bundleFor(sha(f), { predicateType: 'https://spdx.dev/Document' }))).reason, /not a build provenance/)
-  assert.match((await con(signedBy(WORKFLOW), bundleFor(sha(f), { payloadType: 'text/plain' }))).reason, /in-toto/)
+  assert.match((await verifyWith(signedBy(WORKFLOW), bundleFor(sha(f), { predicateType: 'https://spdx.dev/Document' }))).reason, /not a build provenance/)
+  assert.match((await verifyWith(signedBy(WORKFLOW), bundleFor(sha(f), { payloadType: 'text/plain' }))).reason, /in-toto/)
 })
 
 test('con varias atestaciones basta una que cuadre entera', async () => {

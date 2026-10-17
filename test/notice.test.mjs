@@ -13,8 +13,8 @@ import path from 'node:path'
 import { updateNotice, cacheFile } from '../src/notice.js'
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'notice-'))
-const ok = (v) => { let n = 0; const f = async () => { n++; return { ok: true, json: async () => ({ latest: v }) } }; f.veces = () => n; return f }
-const cae = () => async () => ({ ok: false, status: 503 })
+const ok = (v) => { let n = 0; const f = async () => { n++; return { ok: true, json: async () => ({ latest: v }) } }; f.times = () => n; return f }
+const failing = () => async () => ({ ok: false, status: 503 })
 const base = (dir) => ({ current: '0.1.0', source: 'npm', pkg: '@dotrino/env', product: 'dotrino-env', env: { XDG_CACHE_HOME: dir } })
 
 test('avisa cuando hay versión nueva, y calla cuando no', async () => {
@@ -29,11 +29,11 @@ test('una vez al día: la segunda invocación NO vuelve a preguntar', async () =
   await updateNotice({ ...base(d), fetchImpl: f })
   await updateNotice({ ...base(d), fetchImpl: f })
   await updateNotice({ ...base(d), fetchImpl: f })
-  assert.equal(f.veces(), 1, 'preguntó ' + f.veces() + ' veces: eso es tiempo en CADA comando')
+  assert.equal(f.times(), 1, 'preguntó ' + f.times() + ' veces: eso es tiempo en CADA comando')
 
   // Pasado el plazo, sí.
   await updateNotice({ ...base(d), fetchImpl: f, now: Date.now() + 25 * 60 * 60_000 })
-  assert.equal(f.veces(), 2)
+  assert.equal(f.times(), 2)
 })
 
 /**
@@ -48,8 +48,8 @@ test('si no se pudo mirar, la caché NO se pisa con un «al día»', async () =>
   const antes = JSON.parse(fs.readFileSync(f, 'utf8'))
 
   // Plazo vencido y la red caída: se sigue avisando de lo que se sabía.
-  const linea = await updateNotice({ ...base(d), fetchImpl: cae(), now: Date.now() + 25 * 60 * 60_000 })
-  assert.match(linea, /0\.2\.0/, 'se olvidó de lo que ya sabía')
+  const line = await updateNotice({ ...base(d), fetchImpl: failing(), now: Date.now() + 25 * 60 * 60_000 })
+  assert.match(line, /0\.2\.0/, 'se olvidó de lo que ya sabía')
   assert.deepEqual(JSON.parse(fs.readFileSync(f, 'utf8')), antes, 'la caché quedó intacta')
 })
 
@@ -60,5 +60,5 @@ test('se puede apagar, porque en un script estorba', async () => {
 })
 
 test('la primera vez, sin caché y sin red, no dice nada ni revienta', async () => {
-  assert.equal(await updateNotice({ ...base(tmp()), fetchImpl: cae() }), null)
+  assert.equal(await updateNotice({ ...base(tmp()), fetchImpl: failing() }), null)
 })
