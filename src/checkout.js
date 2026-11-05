@@ -12,7 +12,13 @@ import { execFileSync } from 'node:child_process'
 import { CHECK_EVERY_MS } from './index.js'
 import { getJson } from './http.js'
 
+/** @param {string} sha */
 const short = (sha) => String(sha).slice(0, 7)
+/**
+ * @param {import('./types.js').RunFn} run
+ * @param {string} dir
+ * @param {string[]} args
+ */
 const git = (run, dir, args) => String(run('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
 
 /**
@@ -22,6 +28,9 @@ const git = (run, dir, args) => String(run('git', ['-C', dir, ...args], { encodi
  *   { ok: true,  behind: true,  running, latest }   la rama tiene un commit que aquí no está
  *   { ok: false, code: 'not-a-checkout', reason }   no es un clon de git: no se sabe qué corre
  *   { ok: false, code: 'could-not-check', reason }  no se pudo mirar — NO es «al día»
+ *
+ * @param {import('./types.js').CheckoutOptions} [options]
+ * @returns {Promise<import('./types.js').CheckoutResult>}
  */
 export async function checkCheckout ({
   dir, repo, branch = 'main', fetchImpl = fetch, timeoutMs = 10_000, run = execFileSync
@@ -52,6 +61,12 @@ export async function checkCheckout ({
  *
  * Que no sea un clon se dice UNA vez (no se arregla solo, y repetirlo cada día es ruido).
  * Que no se pueda mirar no se dice: no es problema de quien lee el log.
+ *
+ * @param {import('./types.js').CheckoutOptions & {
+ *   name?: string, log?: (line: string) => void, everyMs?: number,
+ *   onBehind?: (r: import('./types.js').CheckoutResult & { ok: true }) => void
+ * }} [options]
+ * @returns {import('./types.js').Stop}
  */
 export function watchCheckout ({ name = 'service', log = console.log, onBehind, everyMs = CHECK_EVERY_MS, ...rest } = {}) {
   let stopped = false

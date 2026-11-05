@@ -37,6 +37,8 @@ jobs:
 
       # LAS PRUEBAS, ANTES DE PUBLICAR. Es lo que separa «se publicó» de «se publicó algo
       # que funciona», y la única razón por la que esto no es `npm publish` a mano.
+      # Los tipos, estrictos (tsconfig.json): antes de las pruebas y antes de publicar.
+      - run: npm run type-check
       - run: npm test
       # El registro de compatibilidad (dotrino-roadmap, CONVENCIONES §14): nada instalado en
       # una versión marcada rota ni por debajo de lo que exige la ficha. Con @latest, que trae

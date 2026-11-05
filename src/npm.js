@@ -43,29 +43,66 @@ import { latestVersion, isNewer, CHECK_EVERY_MS } from './index.js'
 import { integrityOf, INTEGRITY_FILE } from './integrity.js'
 import { getJson } from './http.js'
 
+/**
+ * @typedef {import('./types.js').Thrown} Thrown
+ * @typedef {import('./types.js').RunFn} RunFn
+ * @typedef {import('./types.js').FetchLike} FetchLike
+ * @typedef {import('./types.js').InstallKind} InstallKind
+ * @typedef {import('./types.js').UpdatePrefs} UpdatePrefs
+ * @typedef {import('./types.js').UpdateMarker} UpdateMarker
+ * @typedef {import('./types.js').AskedRecord} AskedRecord
+ * @typedef {import('./types.js').NeedsRootRecord} NeedsRootRecord
+ * @typedef {import('./types.js').Lang} Lang
+ * @typedef {import('./types.js').SelfUpdateOptions} SelfUpdateOptions
+ * @typedef {import('./types.js').SelfUpdateResult} SelfUpdateResult
+ * @typedef {{ ok: false, code: string, reason: string }} Failed
+ */
+
 const REGISTRY = 'https://registry.npmjs.org'
 const GITHUB = 'https://github.com'
 const MAX_INTEGRITY_BYTES = 64 * 1024
+/** @param {string} version */
 const DEFAULT_TAG = (version) => `v${version}`
 const RETRY_MS = 60 * 60_000
 const INSTALL_TIMEOUT_MS = 5 * 60_000
 
+/**
+ * @param {string} code
+ * @param {string} reason
+ * @param {object} [extra]
+ * @returns {Failed}
+ */
 const fail = (code, reason, extra = {}) => ({ ok: false, code, reason, ...extra })
+/** @param {string} p */
 const real = (p) => { try { return fs.realpathSync(p) } catch (_) { return path.resolve(p) } }
+/**
+ * @param {string} child
+ * @param {string} parent
+ */
 const inside = (child, parent) => child === parent || child.startsWith(parent + path.sep)
-/** `@dotrino/update` → `@dotrino%2fupdate`, que es como el registro nombra un paquete con scope. */
+/**
+ * `@dotrino/update` → `@dotrino%2fupdate`, que es como el registro nombra un paquete con scope.
+ * @param {string} pkg
+ */
 const regName = (pkg) => pkg.replace('/', '%2f')
 /**
  * El `npm` DEL MISMO NODE QUE CORRE LA PIEZA. Con nvm o con un Node de usuario hay varios
  * prefijos globales en la máquina, y el `npm` del PATH de un servicio puede ser otro: se
  * instalaría bien… en un sitio del que este proceso no arranca.
+ *
+ * @param {{ execPath?: string, platform?: NodeJS.Platform, exists?: (p: string) => boolean }} [options]
+ * @returns {string}  la ruta del `npm` junto a este Node, o `'npm'` (el del PATH)
  */
 export function findNpm ({ execPath = process.execPath, platform = process.platform, exists = fs.existsSync } = {}) {
   const local = path.join(path.dirname(execPath), platform === 'win32' ? 'npm.cmd' : 'npm')
   return exists(local) ? local : 'npm'
 }
 
-/** `npm root -g` tal como lo imprime npm, o `null` si npm no contesta. */
+/**
+ * `npm root -g` tal como lo imprime npm, o `null` si npm no contesta.
+ * @param {{ run: RunFn, npm: string }} options
+ * @returns {string | null}
+ */
 function npmGlobalRoot ({ run, npm }) {
   try {
     return String(run(npm, ['root', '-g'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 }) || '').trim() || null
@@ -77,6 +114,9 @@ function npmGlobalRoot ({ run, npm }) {
  * que le parece un secreto —un UUID en la ruta sale como `***`—, así que un prefijo
  * perfectamente válido dejaba de reconocerse. Lo tachado casa con cualquier cosa; el resto
  * tiene que coincidir letra a letra.
+ *
+ * @param {string} printed
+ * @param {string} dir
  */
 function sameDir (printed, dir) {
   const re = printed.split('***').map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.+')
@@ -91,8 +131,8 @@ function sameDir (printed, dir) {
  * su raíz global. La carpeta sale de la ruta real del archivo (resolviendo enlaces), no de
  * lo que imprime npm: npm solo confirma.
  *
- * @returns {{ kind: 'global'|'npx'|'local'|'source', selfUpdating: boolean, entry: string,
- *             reason?: string, root?: string, prefix?: string, npm?: string }}
+ * @param {{ entry?: string, run?: RunFn, npm?: string }} [options]
+ * @returns {InstallKind}
  */
 export function installKind ({ entry = process.argv[1], run = execFileSync, npm = findNpm() } = {}) {
   const file = real(entry || '')
@@ -122,19 +162,31 @@ export function installKind ({ entry = process.argv[1], run = execFileSync, npm 
   }
 }
 
-/** ¿Hay quien lo levante si sale? systemd, pm2, o que lo diga quien lo lanza. */
+/**
+ * ¿Hay quien lo levante si sale? systemd, pm2, o que lo diga quien lo lanza.
+ * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ * @returns {boolean}
+ */
 export function supervised ({ env = process.env } = {}) {
   return !!(env.INVOCATION_ID || env.pm_id !== undefined || env.DOTRINO_SUPERVISED === '1')
 }
 
-/** Carpeta de trabajo en el DISCO del usuario, no en `/tmp` (que puede ser un tmpfs pequeño). */
+/**
+ * Carpeta de trabajo en el DISCO del usuario, no en `/tmp` (que puede ser un tmpfs pequeño).
+ * @param {{ home?: string, env?: NodeJS.ProcessEnv }} [options]
+ */
 function workDir ({ home = os.homedir(), env = process.env } = {}) {
   const base = path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'dotrino', 'update')
   fs.mkdirSync(base, { recursive: true, mode: 0o700 })
   return fs.mkdtempSync(path.join(base, 'npm-'))
 }
+/** @param {string} dir */
 const rm = (dir) => { try { fs.rmSync(dir, { recursive: true, force: true }) } catch (_) {} }
 
+/**
+ * @param {string} url
+ * @param {{ fetchImpl?: FetchLike, timeoutMs?: number }} options
+ */
 async function getJsonOrThrow (url, { fetchImpl, timeoutMs = 20_000 }) {
   const r = await getJson(url, { fetchImpl, timeoutMs, headers: { 'user-agent': 'dotrino-update' } })
   if (!r.ok) throw new Error(r.reason)
@@ -144,6 +196,9 @@ async function getJsonOrThrow (url, { fetchImpl, timeoutMs = 20_000 }) {
 /**
  * El `npm-integrity.json` de la release `v<version>` de ese repo. Sigue la redirección de
  * GitHub, con tope de tiempo y de tamaño (es un JSON de unas líneas: lo que pese más no es eso).
+ *
+ * @param {{ repo: string, version: string, tagName: string, fetchImpl: FetchLike, timeoutMs?: number }} options
+ * @returns {Promise<Failed | { ok: true, packages: import('./types.js').IntegrityFile['packages'] }>}
  */
 async function fetchIntegrity ({ repo, version, tagName, fetchImpl, timeoutMs = 20_000 }) {
   const url = `${GITHUB}/${repo}/releases/download/${encodeURIComponent(tagName)}/${INTEGRITY_FILE}`
@@ -152,20 +207,22 @@ async function fetchIntegrity ({ repo, version, tagName, fetchImpl, timeoutMs = 
   try {
     let r
     try { r = await fetchImpl(url, { signal: ac.signal, redirect: 'follow', headers: { 'user-agent': 'dotrino-update' } }) } catch (e) {
-      return fail('INTEGRITY_UNREACHABLE', `could not reach the release of ${repo}: ${e.name === 'AbortError' ? 'timed out' : e.message}`)
+      const err = /** @type {Error} */ (e)
+      return fail('INTEGRITY_UNREACHABLE', `could not reach the release of ${repo}: ${err.name === 'AbortError' ? 'timed out' : err.message}`)
     }
     if (r.status === 404) return fail('NO_INTEGRITY_FILE', `the release ${tagName} of ${repo} has no ${INTEGRITY_FILE} (it may predate this check, or the release does not exist)`)
     if (!r.ok) return fail('INTEGRITY_UNREACHABLE', `GitHub answered ${r.status} for ${INTEGRITY_FILE} of ${repo} ${tagName}`)
     let bytes
     try { bytes = Buffer.from(await r.arrayBuffer()) } catch (e) {
-      return fail('INTEGRITY_UNREACHABLE', `could not read ${INTEGRITY_FILE}: ${e.name === 'AbortError' ? 'timed out' : e.message}`)
+      const err = /** @type {Error} */ (e)
+      return fail('INTEGRITY_UNREACHABLE', `could not read ${INTEGRITY_FILE}: ${err.name === 'AbortError' ? 'timed out' : err.message}`)
     }
     if (bytes.length > MAX_INTEGRITY_BYTES) return fail('INTEGRITY_UNREACHABLE', `${INTEGRITY_FILE} is ${bytes.length} bytes: that is not an integrity file`)
     try {
       const j = JSON.parse(bytes.toString('utf8'))
       if (j?.v !== 1 || !j.packages || typeof j.packages !== 'object') throw new Error('unexpected shape')
       return { ok: true, packages: j.packages }
-    } catch (e) { return fail('INTEGRITY_UNREACHABLE', `${INTEGRITY_FILE} of ${repo} ${tagName} cannot be read: ${e.message}`) }
+    } catch (e) { return fail('INTEGRITY_UNREACHABLE', `${INTEGRITY_FILE} of ${repo} ${tagName} cannot be read: ${/** @type {Error} */ (e).message}`) }
   } finally { clearTimeout(t) }
 }
 
@@ -177,9 +234,11 @@ async function fetchIntegrity ({ repo, version, tagName, fetchImpl, timeoutMs = 
  * `dir` (su carpeta, que BORRA quien llama cuando termine). Con `ok: false` no queda nada
  * en el disco.
  *
- * @param {{ pkg: string, version: string, repo: string, tag?: (version: string) => string }} o
- *   `repo` como `imdotrino/dotrino-update`; `tag` da el tag de la release de una versión
- *   (por defecto `v<versión>`).
+ * @param {{ pkg?: string, version?: string, repo?: string, tag?: (version: string) => string,
+ *           fetchImpl?: FetchLike, home?: string, env?: NodeJS.ProcessEnv }} [o]
+ *   `pkg`, `version` y `repo` hacen falta (sin ellos, `BAD_ARGS`). `repo` como
+ *   `imdotrino/dotrino-update`; `tag` da el tag de la release de una versión (por defecto
+ *   `v<versión>`).
  * @returns {Promise<{ ok: true, file: string, dir: string, integrity: string } |
  *                   { ok: false, code: string, reason: string }>}
  *   códigos: `BAD_ARGS`, `NO_INTEGRITY_FILE` (la release no lo trae), `INTEGRITY_UNREACHABLE`,
@@ -210,7 +269,7 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
     const meta = await getJsonOrThrow(`${REGISTRY}/${regName(pkg)}/${version}`, { fetchImpl })
     tarball = meta?.dist?.tarball
     if (typeof tarball !== 'string' || new URL(tarball).origin !== REGISTRY) throw new Error(`unexpected tarball location: ${tarball}`)
-  } catch (e) { return fail('REGISTRY_UNREACHABLE', `could not read ${pkg}@${version} from the registry: ${e.message}`) }
+  } catch (e) { return fail('REGISTRY_UNREACHABLE', `could not read ${pkg}@${version} from the registry: ${/** @type {Error} */ (e).message}`) }
 
   const dir = workDir({ home, env })
   try {
@@ -220,7 +279,7 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
       const r = await fetchImpl(tarball, { redirect: 'follow', headers: { 'user-agent': 'dotrino-update' } })
       if (!r.ok) throw new Error(`the registry answered ${r.status}`)
       bytes = Buffer.from(await r.arrayBuffer())
-    } catch (e) { rm(dir); return fail('DOWNLOAD_FAILED', `could not download ${pkg}@${version}: ${e.message}`) }
+    } catch (e) { rm(dir); return fail('DOWNLOAD_FAILED', `could not download ${pkg}@${version}: ${/** @type {Error} */ (e).message}`) }
 
     // 3. Tienen que ser lo mismo. Se mide lo que se bajó, y eso mismo es lo que se guarda.
     const got = integrityOf(bytes)
@@ -233,7 +292,12 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
   } catch (e) { rm(dir); throw e }
 }
 
-/** ¿Este usuario puede escribir en el prefijo global? Si no, hace falta root y no se intenta. */
+/**
+ * ¿Este usuario puede escribir en el prefijo global? Si no, hace falta root y no se intenta.
+ * @param {{ root: string, prefix: string }} dirs
+ * @param {{ platform?: NodeJS.Platform, access?: (p: string, mode?: number) => void, exists?: (p: string) => boolean }} [options]
+ * @returns {boolean}
+ */
 function globalWritable ({ root, prefix }, { platform = process.platform, access = fs.accessSync, exists = fs.existsSync } = {}) {
   // Donde npm deja los ejecutables. Si todavía no existe (ningún paquete global trae uno),
   // npm lo crea: entonces lo que tiene que poder escribirse es el prefijo.
@@ -241,6 +305,11 @@ function globalWritable ({ root, prefix }, { platform = process.platform, access
   try { for (const d of [root, exists(bin) ? bin : prefix]) access(d, fs.constants.W_OK); return true } catch (_) { return false }
 }
 
+/**
+ * @param {string} pkg
+ * @param {string} version
+ * @param {string} prefix
+ */
 const needsRoot = (pkg, version, prefix) => `the global npm prefix (${prefix}) is not writable by this user: run \`sudo npm install -g ${pkg}@${version}\`, or move to a user-owned Node (nvm, or \`npm config set prefix ~/.local\`) so it can update itself`
 
 /**
@@ -248,7 +317,12 @@ const needsRoot = (pkg, version, prefix) => `the global npm prefix (${prefix}) i
  * pedida. Con `file` instala ESE tarball (el que ya se verificó); sin él, `pkg@version` del
  * registro — que es instalar sin haber comprobado nada: solo para quien verifica por otro lado.
  *
- * @returns {{ ok: true, version: string } | { ok: false, code: string, reason: string }}
+ * @param {{ pkg?: string, version?: string, file?: string | null, run?: RunFn, npm?: string,
+ *           entry?: string, kind?: InstallKind | null, timeoutMs?: number,
+ *           platform?: NodeJS.Platform, access?: (p: string, mode?: number) => void,
+ *           readFile?: (p: string, encoding: 'utf8') => string }} [options]
+ *   `kind`: lo que ya dijo `installKind` (si no, se mira aquí).
+ * @returns {{ ok: true, version: string } | Failed}
  *   códigos: `BAD_ARGS`, `not-self-updating`, `needs-root`, `install-failed`.
  */
 export function installNpmGlobal ({
@@ -268,13 +342,14 @@ export function installNpmGlobal ({
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs
     })
   } catch (e) {
-    return fail('install-failed', `npm install -g ${pkg}@${version} failed: ${String(e.stderr || e.message).trim().slice(-300)}`)
+    const err = /** @type {Thrown} */ (e)
+    return fail('install-failed', `npm install -g ${pkg}@${version} failed: ${String(err.stderr || err.message).trim().slice(-300)}`)
   }
   // NPM DIJO QUE SÍ; SE MIRA IGUAL. Un «instalado» que dejó la versión de antes es una
   // pieza que se reinicia para nada, una y otra vez.
   let got
   try { got = JSON.parse(readFile(path.join(dirs.root, ...pkg.split('/'), 'package.json'), 'utf8')).version } catch (e) {
-    return fail('install-failed', `npm reported success but ${pkg} cannot be read back from ${dirs.root}: ${e.message}`)
+    return fail('install-failed', `npm reported success but ${pkg} cannot be read back from ${dirs.root}: ${/** @type {Error} */ (e).message}`)
   }
   if (got !== version) return fail('install-failed', `npm reported success but ${pkg} is at ${got}, not ${version}`)
   return { ok: true, version: got }
@@ -290,7 +365,15 @@ export function installNpmGlobal ({
 export const UPDATE_PREFS_FILE = 'update-prefs.json'
 export const UPDATE_MARKER_FILE = 'updated.json'
 
+/**
+ * @param {string} code
+ * @param {string} message
+ */
 const thrown = (code, message) => Object.assign(new Error(message), { code })
+/**
+ * @param {string} file
+ * @param {unknown} obj
+ */
 const writeJson = (file, obj) => {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const tmp = `${file}.${process.pid}.tmp`
@@ -311,7 +394,8 @@ const PREF_DEFAULTS = { approval: false, notify: true }
  * Sin archivo valen los valores por defecto. Un archivo que existe y no se puede leer NO es
  * «los valores por defecto» —el de `approval` es no preguntar, y suponerlo saltaría la
  * aprobación que el dueño encendió—: se lanza (`prefs-unreadable`). No es secreto: va en claro.
- * @returns {{ approval: boolean, notify: boolean }}
+ * @param {string | null | undefined} dir  la carpeta de datos de la instancia (sin ella, lanza `bad-dir`)
+ * @returns {UpdatePrefs}
  */
 export function readUpdatePrefs (dir) {
   if (!dir) throw thrown('bad-dir', 'readUpdatePrefs: a data directory is required')
@@ -319,7 +403,7 @@ export function readUpdatePrefs (dir) {
   if (!fs.existsSync(file)) return { ...PREF_DEFAULTS }
   let raw
   try { raw = JSON.parse(fs.readFileSync(file, 'utf8')) } catch (e) {
-    throw thrown('prefs-unreadable', `${UPDATE_PREFS_FILE} exists but cannot be read: ${e.message}`)
+    throw thrown('prefs-unreadable', `${UPDATE_PREFS_FILE} exists but cannot be read: ${/** @type {Error} */ (e).message}`)
   }
   if (!raw || typeof raw.approval !== 'boolean' || typeof raw.notify !== 'boolean') {
     throw thrown('prefs-unreadable', `${UPDATE_PREFS_FILE} exists but does not say both \`approval\` and \`notify\``)
@@ -327,20 +411,30 @@ export function readUpdatePrefs (dir) {
   return { approval: raw.approval, notify: raw.notify }
 }
 
-/** Cambia SOLO lo que se le pasa (`{ approval }`, `{ notify }` o las dos); lo demás queda como estaba. */
+/**
+ * Cambia SOLO lo que se le pasa (`{ approval }`, `{ notify }` o las dos); lo demás queda como estaba.
+ * @param {string | null | undefined} dir
+ * @param {Partial<UpdatePrefs>} [change]  cada clave, true o false (otra cosa lanza `bad-pref`)
+ * @returns {UpdatePrefs}  cómo quedaron
+ */
 export function writeUpdatePrefs (dir, change = {}) {
   if (!dir) throw thrown('bad-dir', 'writeUpdatePrefs: a data directory is required')
-  const keys = Object.keys(change).filter((k) => change[k] !== undefined)
+  // Las claves se comprueban aquí abajo, en marcha: el tipo solo dice qué se espera.
+  const keys = /** @type {Array<keyof UpdatePrefs>} */ (Object.keys(change)).filter((k) => change[k] !== undefined)
   if (!keys.length || keys.some((k) => !(k in PREF_DEFAULTS) || typeof change[k] !== 'boolean')) {
     throw thrown('bad-pref', 'writeUpdatePrefs: pass `approval` and/or `notify`, each true or false')
   }
   const next = { ...readUpdatePrefs(dir) }
-  for (const k of keys) next[k] = change[k]
+  for (const k of keys) next[k] = /** @type {boolean} */ (change[k])
   writeJson(path.join(dir, UPDATE_PREFS_FILE), { v: 1, ...next })
   return next
 }
 
-/** El marcador tal cual, o `null` si no hay. Ilegible → lanza (`marker-unreadable`). */
+/**
+ * El marcador tal cual, o `null` si no hay. Ilegible → lanza (`marker-unreadable`).
+ * @param {string} dir
+ * @returns {UpdateMarker | null}
+ */
 function readMarker (dir) {
   const file = path.join(dir, UPDATE_MARKER_FILE)
   if (!fs.existsSync(file)) return null
@@ -348,8 +442,9 @@ function readMarker (dir) {
     const m = JSON.parse(fs.readFileSync(file, 'utf8'))
     if (typeof m?.to !== 'string' || typeof m?.from !== 'string') throw new Error('it does not name the versions')
     return m
-  } catch (e) { throw thrown('marker-unreadable', `${UPDATE_MARKER_FILE} exists but cannot be read: ${e.message}`) }
+  } catch (e) { throw thrown('marker-unreadable', `${UPDATE_MARKER_FILE} exists but cannot be read: ${/** @type {Error} */ (e).message}`) }
 }
+/** @param {string} dir */
 const dropMarker = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_MARKER_FILE), { force: true }) } catch (_) {} }
 
 /**
@@ -360,15 +455,21 @@ const dropMarker = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_MARKER_FILE)
  * Devuelve `{ from, to }` y BORRA el marcador; `null` si no hay, o si todavía corre la
  * vieja (el marcador se queda para el próximo arranque). Uno de una versión anterior a la
  * que corre ya no dice nada y se borra. Ilegible → lanza (`marker-unreadable`).
+ * @param {{ dir?: string | null, current?: string }} [options]
  * @returns {{ from: string, to: string } | null}
  */
 export function takeUpdateMarker ({ dir, current } = {}) {
   const m = peekUpdateMarker({ dir, current })
-  if (m) dropMarker(dir)
+  // Con `m` hay `dir` (sin ella, `peekUpdateMarker` lanza): la comprobación es para el tipo.
+  if (m && dir) dropMarker(dir)
   return m
 }
 
-/** Lo mismo que `takeUpdateMarker` pero SIN borrarlo: para avisar primero y borrar si salió. */
+/**
+ * Lo mismo que `takeUpdateMarker` pero SIN borrarlo: para avisar primero y borrar si salió.
+ * @param {{ dir?: string | null, current?: string }} [options]
+ * @returns {{ from: string, to: string } | null}
+ */
 function peekUpdateMarker ({ dir, current } = {}) {
   if (!dir) throw thrown('bad-dir', 'takeUpdateMarker: a data directory is required')
   const m = readMarker(dir)
@@ -389,7 +490,11 @@ export const UPDATE_ASKED_FILE = 'update-asked.json'
 /** Cuánto vale un pedido sin respuesta antes de darse por negado. */
 export const ASK_TTL_MS = 24 * 60 * 60_000
 
-/** Lo último que se preguntó, o `null`. Ilegible → lanza (`asked-unreadable`). */
+/**
+ * Lo último que se preguntó, o `null`. Ilegible → lanza (`asked-unreadable`).
+ * @param {string} dir
+ * @returns {AskedRecord | null}
+ */
 function readAsked (dir) {
   const file = path.join(dir, UPDATE_ASKED_FILE)
   if (!fs.existsSync(file)) return null
@@ -397,8 +502,9 @@ function readAsked (dir) {
     const a = JSON.parse(fs.readFileSync(file, 'utf8'))
     if (typeof a?.version !== 'string' || typeof a?.askedAt !== 'number' || !['pending', 'denied', 'approved'].includes(a.result)) throw new Error('it does not say what was asked')
     return a
-  } catch (e) { throw thrown('asked-unreadable', `${UPDATE_ASKED_FILE} exists but cannot be read: ${e.message}`) }
+  } catch (e) { throw thrown('asked-unreadable', `${UPDATE_ASKED_FILE} exists but cannot be read: ${/** @type {Error} */ (e).message}`) }
 }
+/** @param {string} dir */
 const dropAsked = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_ASKED_FILE), { force: true }) } catch (_) {} }
 
 // --- HACE FALTA ROOT: SE AVISA, NO SE INTENTA ---------------------------------------------
@@ -409,7 +515,11 @@ const dropAsked = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_ASKED_FILE), 
 
 export const UPDATE_NEEDS_ROOT_FILE = 'update-needs-root.json'
 
-/** `{ version, at, notified }` o `null`. Ilegible → lanza (`needs-root-unreadable`). */
+/**
+ * `{ version, at, notified }` o `null`. Ilegible → lanza (`needs-root-unreadable`).
+ * @param {string} dir
+ * @returns {NeedsRootRecord | null}
+ */
 function readNeedsRoot (dir) {
   const file = path.join(dir, UPDATE_NEEDS_ROOT_FILE)
   if (!fs.existsSync(file)) return null
@@ -417,14 +527,20 @@ function readNeedsRoot (dir) {
     const n = JSON.parse(fs.readFileSync(file, 'utf8'))
     if (typeof n?.version !== 'string' || typeof n?.notified !== 'boolean') throw new Error('it does not say which version')
     return n
-  } catch (e) { throw thrown('needs-root-unreadable', `${UPDATE_NEEDS_ROOT_FILE} exists but cannot be read: ${e.message}`) }
+  } catch (e) { throw thrown('needs-root-unreadable', `${UPDATE_NEEDS_ROOT_FILE} exists but cannot be read: ${/** @type {Error} */ (e).message}`) }
 }
+/** @param {string} dir */
 const dropNeedsRoot = (dir) => { try { fs.rmSync(path.join(dir, UPDATE_NEEDS_ROOT_FILE), { force: true }) } catch (_) {} }
 
 /**
  * Apunta que esa versión necesita root y, si toca, avisa. «Toca» es: hay `onNeedsRoot`, la
  * instancia no apagó `notify`, y de esa versión (o de una posterior) todavía no se avisó. Si
  * el aviso lanza NO queda como avisado: se reintenta en la próxima pasada. Nunca lanza.
+ *
+ * @param {{ dir?: string | null, pkg: string, version: string, from: string,
+ *           onNeedsRoot?: SelfUpdateOptions['onNeedsRoot'], log: (line: string) => void,
+ *           now: () => number }} options
+ * @returns {Promise<void>}
  */
 async function noteNeedsRoot ({ dir, pkg, version, from, onNeedsRoot, log, now }) {
   if (!dir) return
@@ -434,15 +550,23 @@ async function noteNeedsRoot ({ dir, pkg, version, from, onNeedsRoot, log, now }
     let notified = same ? prev.notified : false
     if (!notified && onNeedsRoot && readUpdatePrefs(dir).notify) {
       try { await onNeedsRoot({ version, from }); notified = true } catch (e) {
-        log(`[update] could not tell that ${pkg} ${version} needs root to install (${e?.message || e}) · it will try again on the next check`)
+        log(`[update] could not tell that ${pkg} ${version} needs root to install (${/** @type {Thrown | undefined} */ (e)?.message || e}) · it will try again on the next check`)
       }
     }
     if (!same || notified !== prev.notified) writeJson(path.join(dir, UPDATE_NEEDS_ROOT_FILE), { v: 1, pkg, version, at: same ? prev.at : now(), notified })
   } catch (e) {
-    log(`[update] could not note that ${pkg} ${version} needs root (${e?.message || e})`)
+    log(`[update] could not note that ${pkg} ${version} needs root (${/** @type {Thrown | undefined} */ (e)?.message || e})`)
   }
 }
 
+/**
+ * @type {Record<Lang, {
+ *   declined: (v: string, d: string, pkg: string) => string,
+ *   waiting: (v: string, d: string) => string,
+ *   unreadable: (m: string) => string,
+ *   needsRoot: (v: string, pkg: string) => string
+ * }>}
+ */
 const STATUS_TEXT = {
   es: {
     declined: (v, d, pkg) => `se pidió permiso para instalar la ${v} el ${d} y no se aprobó: no se vuelve a pedir · instálala con: npm i -g ${pkg}@${v}`,
@@ -463,26 +587,36 @@ const STATUS_TEXT = {
  * corre y que no se instaló sola: que se pidió permiso y no se dio, o que la instalación
  * necesita root. Con cómo instalarla a mano. Cadena vacía si no hay nada que decir. No
  * lanza: si un apunte no se puede leer, eso es lo que dice.
+ * @param {{ dir?: string | null, current?: string, lang?: string, now?: () => number }} [options]
+ *   `lang`: `es` o `en` (otro, español)
  * @returns {string}
  */
 export function updateStatusText ({ dir, current, lang = 'es', now = Date.now } = {}) {
-  const T = STATUS_TEXT[lang] || STATUS_TEXT.es
+  const T = STATUS_TEXT[/** @type {Lang} */ (lang)] || STATUS_TEXT.es
   if (!dir) return ''
   const lines = []
   try {
     const n = readNeedsRoot(dir)
     if (n && isNewer(n.version, current)) lines.push(T.needsRoot(n.version, n.pkg || '<pkg>'))
-  } catch (e) { lines.push(T.unreadable(e.message)) }
+  } catch (e) { lines.push(T.unreadable(/** @type {Error} */ (e).message)) }
   try {
     const a = readAsked(dir)
     if (a && a.result !== 'approved' && isNewer(a.version, current)) {
       const day = new Date(a.askedAt).toISOString().slice(0, 10)
       lines.push(a.result === 'pending' && now() - a.askedAt < ASK_TTL_MS ? T.waiting(a.version, day) : T.declined(a.version, day, a.pkg || '<pkg>'))
     }
-  } catch (e) { lines.push(T.unreadable(e.message)) }
+  } catch (e) { lines.push(T.unreadable(/** @type {Error} */ (e).message)) }
   return lines.join('\n')
 }
 
+/**
+ * @type {Record<Lang, {
+ *   approval: { on: string, off: string },
+ *   notify: { on: string, off: string },
+ *   usage: string,
+ *   unreadable: (m: string) => string
+ * }>}
+ */
 const PREFS_TEXT = {
   es: {
     approval: { on: 'Este agente pide aprobación antes de actualizarse.', off: 'Este agente se actualiza solo, sin pedir aprobación.' },
@@ -504,15 +638,19 @@ const PREFS_TEXT = {
  * enseña las dos líneas. Las dos banderas pueden ir juntas. No imprime: devuelve qué imprimir.
  *
  * @param {string[]} args  los argumentos del subcomando (p. ej. `['--approval', 'on']`)
+ * @param {{ dir?: string | null, lang?: string }} [options]
  * @returns {{ handled: boolean, ok: boolean, text: string, prefs?: { approval: boolean, notify: boolean } }}
  *   `handled: false` solo si `args` trae algo y ninguna de las dos banderas (no era para
  *   esto). `ok: false` con `text` listo para stderr si un valor no vale o las preferencias
  *   no se pueden leer; en ese caso no se guarda nada.
  */
 export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
-  const T = PREFS_TEXT[lang] || PREFS_TEXT.es
-  const asked = ['approval', 'notify'].filter((k) => args.includes(`--${k}`))
+  const T = PREFS_TEXT[/** @type {Lang} */ (lang)] || PREFS_TEXT.es
+  /** @type {Array<keyof UpdatePrefs>} */
+  const both = ['approval', 'notify']
+  const asked = both.filter((k) => args.includes(`--${k}`))
   if (!asked.length && args.length) return { handled: false, ok: true, text: '' }
+  /** @type {Partial<UpdatePrefs>} */
   const change = {}
   for (const k of asked) {
     const v = args[args.indexOf(`--${k}`) + 1]
@@ -521,10 +659,10 @@ export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
   }
   try {
     const prefs = Object.keys(change).length ? writeUpdatePrefs(dir, change) : readUpdatePrefs(dir)
-    const show = asked.length ? asked : ['approval', 'notify']
+    const show = asked.length ? asked : both
     return { handled: true, ok: true, text: show.map((k) => T[k][prefs[k] ? 'on' : 'off']).join('\n'), prefs }
   } catch (e) {
-    return { handled: true, ok: false, text: T.unreadable(e.message) }
+    return { handled: true, ok: false, text: T.unreadable(/** @type {Error} */ (e).message) }
   }
 }
 
@@ -566,6 +704,9 @@ export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
  * `not-self-updating`, `needs-root`, `prefs-unreadable`, `asked-unreadable`, `no-approver`,
  * `could-not-ask`, `not-approved`, `already-declined`, `unverified` (con `why`: el código de
  * `verifyNpmPackage`) e `install-failed`.
+ *
+ * @param {SelfUpdateOptions} [options]
+ * @returns {Promise<SelfUpdateResult>}
  */
 export async function selfUpdateNpm ({
   pkg, current, repo, tag = DEFAULT_TAG, mayUpdate = null, onInstalled = null, onNeedsRoot = null,
@@ -574,11 +715,17 @@ export async function selfUpdateNpm ({
 } = {}) {
   if (!pkg || !repo) return fail('could-not-check', 'selfUpdateNpm: `pkg` and `repo` are required')
   // `isNewer` da false si `current` no es una versión, y eso se leería como «al día».
-  if (!/^\d+\.\d+\.\d+$/.test(String(current || '').trim())) return fail('could-not-check', `selfUpdateNpm: \`current\` is not a version: ${current}`)
+  if (typeof current !== 'string' || !/^\d+\.\d+\.\d+$/.test(current.trim())) return fail('could-not-check', `selfUpdateNpm: \`current\` is not a version: ${current}`)
   const latest = await latestVersion({ source: 'npm', pkg, fetchImpl, product: pkg, version: current })
   if (!latest.ok) return fail('could-not-check', latest.reason)
   if (!isNewer(latest.version, current)) return { ok: true, code: 'up-to-date', version: current }
   const version = latest.version
+  /**
+   * @param {string} code
+   * @param {string} reason
+   * @param {object} [extra]
+   * @returns {SelfUpdateResult}
+   */
   const out = (code, reason, extra = {}) => ({ ok: false, code, reason, version, from: current, ...extra })
 
   const kind = installKind({ entry, run, npm })
@@ -599,8 +746,9 @@ export async function selfUpdateNpm ({
   let ask = !!mayUpdate
   if (dir) {
     try { ask = readUpdatePrefs(dir).approval } catch (e) {
-      log(`[update] ${pkg} ${version} is out (this one is ${current}) · its update preferences could not be read (${e.message}) · not updating`)
-      return out('prefs-unreadable', e.message)
+      const err = /** @type {Error} */ (e)
+      log(`[update] ${pkg} ${version} is out (this one is ${current}) · its update preferences could not be read (${err.message}) · not updating`)
+      return out('prefs-unreadable', err.message)
     }
   }
   if (ask) {
@@ -613,26 +761,35 @@ export async function selfUpdateNpm ({
     // UNA VEZ POR VERSIÓN (hace falta `dir` para apuntarlo). Lo ya preguntado —negado, o a
     // medias cuando el proceso se reinició— no se vuelve a preguntar; solo una versión MÁS
     // NUEVA que la apuntada dispara otro pedido.
+    /** @type {AskedRecord | null} */
     let asked = null
     if (dir) {
       try { asked = readAsked(dir) } catch (e) {
-        log(`[update] ${pkg} ${version} is out (this one is ${current}) · what was already asked could not be read (${e.message}) · not updating`)
-        return out('asked-unreadable', e.message)
+        const err = /** @type {Error} */ (e)
+        log(`[update] ${pkg} ${version} is out (this one is ${current}) · what was already asked could not be read (${err.message}) · not updating`)
+        return out('asked-unreadable', err.message)
       }
     }
-    const already = asked && !isNewer(version, asked.version)
-    if (already && asked.result !== 'approved') {
-      return out('already-declined', `approval to install ${asked.version} was already asked and not given: it will not ask again`, { askedAt: asked.askedAt })
+    const prev = asked   // `const`, para que el tipo sepa que ya no cambia
+    const already = prev && !isNewer(version, prev.version)
+    if (already && prev.result !== 'approved') {
+      return out('already-declined', `approval to install ${prev.version} was already asked and not given: it will not ask again`, { askedAt: prev.askedAt })
     }
     if (!already) {
+      /**
+       * @param {AskedRecord['result']} result
+       * @param {number} askedAt
+       */
       const note = (result, askedAt) => { if (dir) writeJson(path.join(dir, UPDATE_ASKED_FILE), { v: 1, pkg, version, askedAt, result }) }
       const askedAt = now()
       try { note('pending', askedAt) } catch (e) {
-        log(`[update] ${pkg} ${version} is out (this one is ${current}) · the request could not be noted (${e.message}) · not updating`)
-        return out('asked-unreadable', e.message)
+        const err = /** @type {Error} */ (e)
+        log(`[update] ${pkg} ${version} is out (this one is ${current}) · the request could not be noted (${err.message}) · not updating`)
+        return out('asked-unreadable', err.message)
       }
       let yes
-      try { yes = await mayUpdate({ pkg, version, from: current }) } catch (e) {
+      try { yes = await mayUpdate({ pkg, version, from: current }) } catch (thrownByAsk) {
+        const e = /** @type {Thrown | undefined} */ (thrownByAsk)
         // NO SE PUDO PREGUNTAR (la bóveda no contesta, no hay red): eso no es una negativa.
         // No queda apuntado nada y se reintenta en la próxima pasada.
         if (dir) { dropAsked(dir); dropNeedsRoot(dir) }
@@ -664,7 +821,7 @@ export async function selfUpdateNpm ({
   // puede escribir, la instalación vale igual: se dice, y lo único que se pierde es el aviso.
   if (dir) {
     try { writeJson(path.join(dir, UPDATE_MARKER_FILE), { v: 1, pkg, from: current, to: version, at: now() }) } catch (e) {
-      log(`[update] could not leave the update marker in ${dir}: ${e.message}`)
+      log(`[update] could not leave the update marker in ${dir}: ${/** @type {Error} */ (e).message}`)
     }
   }
   if (dir) { dropAsked(dir); dropNeedsRoot(dir) }
@@ -672,7 +829,7 @@ export async function selfUpdateNpm ({
   log(restart
     ? `[update] ${pkg} ${version} installed (checked against the release of its repo) · restarting now to run it`
     : `[update] ${pkg} ${version} installed (checked against the release of its repo) · restart it to run the new version`)
-  try { await onInstalled?.({ version, from: current, restart }) } catch (e) { log(`[update] onInstalled failed: ${e?.message || e}`) }
+  try { await onInstalled?.({ version, from: current, restart }) } catch (e) { log(`[update] onInstalled failed: ${/** @type {Thrown | undefined} */ (e)?.message || e}`) }
   return { ok: true, code: restart ? 'installed-restart' : 'installed', version, from: current }
 }
 
@@ -687,14 +844,19 @@ export async function selfUpdateNpm ({
  * acaba de instalar (hace falta `dir`) y la instancia no apagó los avisos
  * (`readUpdatePrefs(dir).notify`). Es donde el daemon se lo dice a su bóveda. Si lanza, el
  * marcador no se pierde: se reintenta en el próximo arranque.
+ *
+ * @param {import('./types.js').WatchSelfUpdateOptions} [options]
+ * @returns {import('./types.js').Stop}
  */
 export function watchSelfUpdateNpm ({
   everyMs = CHECK_EVERY_MS, retryMs = RETRY_MS, onResult = null, onUpdated = null, log = () => {}, ...opts
 } = {}) {
   let stopped = false
   let busy = false
+  /** @type {string | null | undefined} */
   let lastFail = null
-  let retry = null
+  /** @type {NodeJS.Timeout | undefined} */
+  let retry
   // ¿ME ACABO DE ACTUALIZAR? Se mira una vez, al arrancar, y no frena lo demás. El marcador
   // solo se borra cuando el aviso SALIÓ (o cuando el dueño apagó los avisos): si avisar
   // falla, se queda para el próximo arranque.
@@ -706,7 +868,7 @@ export function watchSelfUpdateNpm ({
       if (readUpdatePrefs(opts.dir).notify) await onUpdated({ version: m.to, from: m.from })
       dropMarker(opts.dir)
     } catch (e) {
-      log(`[update] could not tell that ${opts.pkg} updated (${e?.message || e}) · it will try again on the next start`)
+      log(`[update] could not tell that ${opts.pkg} updated (${/** @type {Thrown | undefined} */ (e)?.message || e}) · it will try again on the next start`)
     }
   }
   announce()

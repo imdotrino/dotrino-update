@@ -15,6 +15,6 @@ if (cmd !== 'integrity' || !args.length || args.some((a) => a.startsWith('-'))) 
 try {
   process.stdout.write(JSON.stringify(buildIntegrity(args), null, 2) + '\n')
 } catch (e) {
-  console.error(`dotrino-update integrity: ${e.message}`)
+  console.error(`dotrino-update integrity: ${/** @type {Error} */ (e).message}`)
   process.exit(1)
 }

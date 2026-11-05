@@ -36,13 +36,34 @@
 
 import { getJson } from './http.js'
 
-/** `0.123.0` → `[0,123,0]`. Lo que no sean tres números no compite. */
+/**
+ * @typedef {import('./types.js').LatestOptions} LatestOptions
+ * @typedef {import('./types.js').LatestResult} LatestResult
+ * @typedef {import('./types.js').CheckOptions} CheckOptions
+ * @typedef {import('./types.js').CheckResult} CheckResult
+ * @typedef {import('./types.js').WatchOptions} WatchOptions
+ * @typedef {import('./types.js').GetJsonOptions} GetJsonOptions
+ */
+
+/**
+ * `0.123.0` → `[0,123,0]`. Lo que no sean tres números no compite.
+ * @param {string | null | undefined} v
+ * @returns {number[]}
+ */
 const parts = (v) => String(v || '').trim().replace(/^v/, '').split('.').map((n) => parseInt(n, 10))
+/**
+ * @param {string | null | undefined} v
+ * @returns {v is string}
+ */
 const valid = (v) => parts(v).length === 3 && parts(v).every((n) => Number.isFinite(n))
 
 /**
  * ¿`a` es más nueva que `b`? Sin dependencias: son tres números y compararlos bien cabe
  * aquí. Un comparador de semver a medias es peor que no tenerlo, porque falla callado.
+ *
+ * @param {string | null | undefined} a
+ * @param {string | null | undefined} b
+ * @returns {boolean}  false también si alguna de las dos no es una versión
  */
 export function isNewer (a, b) {
   if (!valid(a) || !valid(b)) return false
@@ -50,8 +71,16 @@ export function isNewer (a, b) {
   return x !== p ? x > p : y !== q ? y > q : z > r
 }
 
+/**
+ * @param {string} [product]
+ * @param {string} [version]
+ */
 const ua = (product, version) => `${product || 'dotrino'}/${version || '0'} (+https://dotrino.com)`
 
+/**
+ * @param {string} url
+ * @param {GetJsonOptions & { product?: string, version?: string }} options
+ */
 const get = (url, { fetchImpl, timeoutMs, headers = {}, product, version }) =>
   getJson(url, { fetchImpl, timeoutMs, headers: { 'user-agent': ua(product, version), ...headers } })
 
@@ -65,6 +94,9 @@ const get = (url, { fetchImpl, timeoutMs, headers = {}, product, version }) =>
  *
  * Devuelve `{ ok: false, reason }` cuando no se pudo mirar, que **no** es «estás al día»:
  * quien lo enseñe tiene que poder decir cuál de las dos cosas pasó.
+ *
+ * @param {LatestOptions} [options]
+ * @returns {Promise<LatestResult>}
  */
 export async function latestVersion ({
   source, repo, pkg, tagPrefix, fetchImpl = fetch, timeoutMs = 10_000, product, version
@@ -82,6 +114,7 @@ export async function latestVersion ({
   if (source === 'github') {
     if (!repo) return { ok: false, reason: 'latestVersion: `repo` is required with source "github"' }
     const headers = { accept: 'application/vnd.github+json' }
+    /** @type {{ v: string, body: any } | undefined} */
     let rel
     if (tagPrefix) {
       // Un repo con VARIOS productos etiqueta cada uno con su prefijo (`desktop-v1.2.3`,
@@ -106,7 +139,7 @@ export async function latestVersion ({
     }
     const r = rel
     const v = rel.v
-    const assets = (r.body.assets || []).map((a) => ({ name: a.name, url: a.browser_download_url, size: a.size }))
+    const assets = (r.body.assets || []).map((/** @type {any} */ a) => ({ name: a.name, url: a.browser_download_url, size: a.size }))
     return { ok: true, version: v, source: 'github', repo, assets, url: r.body.html_url }
   }
   return { ok: false, reason: `latestVersion: unknown source "${source}"` }
@@ -118,6 +151,9 @@ export async function latestVersion ({
  *
  * Tres respuestas y ninguna se confunde con otra: `{ok:true, newer:true}` (hay),
  * `{ok:true, newer:false}` (al día) y `{ok:false, reason}` (no se pudo mirar).
+ *
+ * @param {CheckOptions} [options]
+ * @returns {Promise<CheckResult>}
  */
 export async function checkForUpdate ({ current, ...rest } = {}) {
   if (!valid(current)) return { ok: false, reason: `checkForUpdate: \`current\` is not a version: ${current}` }
@@ -137,6 +173,9 @@ export const CHECK_EVERY_MS = 24 * 60 * 60_000
  *
  * No lanza nunca: que no se pueda mirar no es problema del usuario, y llenarle el log de
  * fallos de red tampoco le ayuda. Solo habla cuando hay algo que decir.
+ *
+ * @param {WatchOptions} [options]
+ * @returns {import('./types.js').Stop}
  */
 export function watchForUpdate ({ onNewer, everyMs = CHECK_EVERY_MS, ...rest } = {}) {
   let stopped = false

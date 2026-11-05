@@ -24,13 +24,23 @@ import os from 'node:os'
 import path from 'node:path'
 import { checkForUpdate, isNewer, CHECK_EVERY_MS } from './index.js'
 
-/** Donde se recuerda lo último visto. XDG, y si no hay, `~/.cache`. */
+/**
+ * Donde se recuerda lo último visto. XDG, y si no hay, `~/.cache`.
+ * @param {string | undefined} key  el paquete, el repo o el producto
+ * @param {{ home?: string, env?: NodeJS.ProcessEnv }} [options]
+ * @returns {string}
+ */
 export function cacheFile (key, { home = os.homedir(), env = process.env } = {}) {
   const base = env.XDG_CACHE_HOME || path.join(home, '.cache')
   return path.join(base, 'dotrino', 'update', `${String(key).replace(/[^\w.@-]/g, '_')}.json`)
 }
 
+/** @param {string} f */
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch (_) { return null } }
+/**
+ * @param {string} f
+ * @param {unknown} v
+ */
 const writeJson = (f, v) => {
   try {
     fs.mkdirSync(path.dirname(f), { recursive: true })
@@ -44,6 +54,9 @@ const writeJson = (f, v) => {
  * Lo que se sabe sale de la caché (instantáneo). Si la caché está vieja, SE MIRA aquí —con
  * tope— y se guarda para la próxima. Ese es el único momento en que esto cuesta tiempo, una
  * vez al día.
+ *
+ * @param {import('./types.js').NoticeOptions} [options]
+ * @returns {Promise<string | null>}
  */
 export async function updateNotice ({
   current, product, source, pkg, repo,
@@ -72,6 +85,9 @@ export async function updateNotice ({
  *
  *     process.on('exit', …)  NO sirve — esto es asíncrono.
  *     await printUpdateNotice({ current: VERSION, source: 'npm', pkg: '@dotrino/env' })
+ *
+ * @param {import('./types.js').NoticeOptions} [opts]
+ * @returns {Promise<boolean>}  si imprimió algo
  */
 export async function printUpdateNotice (opts = {}) {
   try {

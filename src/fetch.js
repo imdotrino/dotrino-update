@@ -10,11 +10,21 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 
 /**
+ * @typedef {import('./types.js').ReleaseAsset} ReleaseAsset
+ * @typedef {import('./types.js').AssetMatch} AssetMatch
+ * @typedef {import('./types.js').DownloadOptions} DownloadOptions
+ * @typedef {import('./types.js').VerifyResult} VerifyResult
+ * @typedef {import('./types.js').SigstoreLib} SigstoreLib
+ * @typedef {import('./types.js').FetchLike} FetchLike
+ */
+
+/**
  * Qué archivo del release le toca a ESTA máquina. `match` es cosa de cada producto —el
  * vault emite `.deb` y tarball; otro emitirá otra cosa—, así que se pasa.
  *
- * @param {Array<{name:string,url:string}>} assets
- * @param {Array<{kind:string, re:RegExp, when?:() => boolean}>} match  en orden de preferencia
+ * @param {ReleaseAsset[] | null | undefined} assets
+ * @param {AssetMatch[]} match  en orden de preferencia
+ * @returns {{ ok: true, asset: ReleaseAsset, kind: string } | { ok: false, reason: string }}
  */
 export function pickAsset (assets, match) {
   for (const m of match) {
@@ -25,7 +35,12 @@ export function pickAsset (assets, match) {
   return { ok: false, reason: 'the release has no file for this machine' }
 }
 
-/** Baja a un directorio temporal propio y devuelve dónde quedó. */
+/**
+ * Baja a un directorio temporal propio y devuelve dónde quedó.
+ * @param {ReleaseAsset} asset
+ * @param {DownloadOptions} [options]
+ * @returns {Promise<string>}  la ruta del archivo
+ */
 export async function download (asset, { fetchImpl = fetch, dir = null, product, version } = {}) {
   const dest = dir || fs.mkdtempSync(path.join(os.tmpdir(), 'dotrino-update-'))
   const file = path.join(dest, path.basename(asset.name))
@@ -68,14 +83,23 @@ export async function download (asset, { fetchImpl = fetch, dir = null, product,
 const ISSUER = 'https://token.actions.githubusercontent.com'
 const PROVENANCE = /^https:\/\/slsa\.dev\/provenance\//
 
-/** La librería de sigstore, si la pieza la instaló. */
+/**
+ * La librería de sigstore, si la pieza la instaló.
+ * @returns {Promise<SigstoreLib | null>}
+ */
 async function loadSigstore () {
   try { return await import('sigstore') } catch (e) {
-    if (e?.code === 'ERR_MODULE_NOT_FOUND') return null
+    if (/** @type {import('./types.js').Thrown} */ (e)?.code === 'ERR_MODULE_NOT_FOUND') return null
     throw e
   }
 }
 
+/**
+ * @param {string} file
+ * @param {{ repo?: string, fetchImpl?: FetchLike, sigstore?: SigstoreLib | null }} [options]
+ *   `sigstore`: la librería ya cargada (`null` = no hay); sin pasarla se carga sola.
+ * @returns {Promise<VerifyResult>}
+ */
 export async function verifyArtifact (file, { repo, fetchImpl = fetch, sigstore = undefined } = {}) {
   if (!repo) return { ok: false, reason: 'verifyArtifact: `repo` is required' }
   const lib = sigstore === undefined ? await loadSigstore() : sigstore
@@ -90,9 +114,9 @@ export async function verifyArtifact (file, { repo, fetchImpl = fetch, sigstore 
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'dotrino-update' }
     })
     if (!r.ok) throw new Error(`GitHub answered ${r.status}`)
-    bundles = ((await r.json())?.attestations || []).map((a) => a?.bundle).filter(Boolean)
+    bundles = ((/** @type {any} */ (await r.json()))?.attestations || []).map((/** @type {any} */ a) => a?.bundle).filter(Boolean)
   } catch (e) {
-    return { ok: false, code: 'NO_ATTESTATION', reason: `could not fetch the attestation of this file: ${e.message}` }
+    return { ok: false, code: 'NO_ATTESTATION', reason: `could not fetch the attestation of this file: ${/** @type {Error} */ (e).message}` }
   }
   if (!bundles.length) {
     return { ok: false, code: 'NO_ATTESTATION', reason: `GitHub has no attestation for this file (sha256 ${hash}): it was not built by the release of ${repo}` }
@@ -109,14 +133,19 @@ export async function verifyArtifact (file, { repo, fetchImpl = fetch, sigstore 
       if (env?.payloadType !== 'application/vnd.in-toto+json') throw new Error('the attestation is not an in-toto statement')
       const statement = JSON.parse(Buffer.from(env.payload, 'base64').toString('utf8'))
       if (!PROVENANCE.test(String(statement.predicateType))) throw new Error(`not a build provenance (${statement.predicateType})`)
-      if (!(statement.subject || []).some((s) => s?.digest?.sha256 === hash)) throw new Error('the attestation is for another file')
+      if (!(statement.subject || []).some((/** @type {any} */ s) => s?.digest?.sha256 === hash)) throw new Error('the attestation is for another file')
       return { ok: true, out: `verified: built by ${who}` }
-    } catch (e) { why = e.message }
+    } catch (e) { why = /** @type {Error} */ (e).message }
   }
   return { ok: false, code: 'BAD_SIGNATURE', reason: `the signature does not check out: ${String(why).trim().slice(0, 300)}` }
 }
 
-/** Bajar y verificar, que es lo que casi siempre se quiere junto. No instala: eso es del producto. */
+/**
+ * Bajar y verificar, que es lo que casi siempre se quiere junto. No instala: eso es del producto.
+ * @param {ReleaseAsset} asset
+ * @param {DownloadOptions & { repo?: string, sigstore?: SigstoreLib | null }} [options]
+ * @returns {Promise<VerifyResult & { file?: string }>}  `file` siempre que se bajó
+ */
 export async function fetchVerified (asset, { repo, ...rest } = {}) {
   const file = await download(asset, rest)
   const v = await verifyArtifact(file, { repo, fetchImpl: rest.fetchImpl, sigstore: rest.sigstore })

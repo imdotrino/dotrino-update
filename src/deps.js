@@ -12,6 +12,10 @@ import path from 'node:path'
 import { watchForUpdate } from './index.js'
 import { printUpdateNotice } from './notice.js'
 
+/**
+ * @param {string} message
+ * @param {string} code
+ */
 const fail = (message, code) => Object.assign(new Error(message), { code })
 
 /**
@@ -20,17 +24,20 @@ const fail = (message, code) => Object.assign(new Error(message), { code })
  *
  * Lanza si no puede leer algo: una dependencia declarada y sin instalar es un despliegue a
  * medias, y callarlo sería decir «al día» sin haber mirado.
+ *
+ * @param {{ dir?: string, match?: RegExp }} [options]
+ * @returns {import('./types.js').InstalledDep[]}
  */
 export function installedDeps ({ dir, match = /^@dotrino\// } = {}) {
   if (!dir) throw fail('installedDeps: `dir` is required', 'deps-no-dir')
   let pkg
   try { pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) } catch (e) {
-    throw fail(`installedDeps: cannot read ${path.join(dir, 'package.json')}: ${e.message}`, 'deps-unreadable')
+    throw fail(`installedDeps: cannot read ${path.join(dir, 'package.json')}: ${/** @type {Error} */ (e).message}`, 'deps-unreadable')
   }
   return Object.keys(pkg.dependencies || {}).filter((name) => match.test(name)).map((name) => {
     const file = path.join(dir, 'node_modules', name, 'package.json')
     try { return { pkg: name, version: JSON.parse(fs.readFileSync(file, 'utf8')).version } } catch (e) {
-      throw fail(`installedDeps: ${name} is declared and not installed (${file}): ${e.message}`, 'deps-not-installed')
+      throw fail(`installedDeps: ${name} is declared and not installed (${file}): ${/** @type {Error} */ (e).message}`, 'deps-not-installed')
     }
   })
 }
@@ -40,6 +47,12 @@ export function installedDeps ({ dir, match = /^@dotrino\// } = {}) {
  * pararlos todos. `log` recibe una línea, en inglés, cuando hay algo más nuevo.
  *
  *   watchDependencies({ dir: __dirname, name: 'geo' })
+ *
+ * @param {Omit<import('./types.js').WatchOptions, 'onNewer' | 'current' | 'source' | 'pkg'> & {
+ *   dir?: string, match?: RegExp, name?: string, log?: (line: string) => void,
+ *   onNewer?: (r: import('./types.js').UpdateFound & { pkg: string }) => void
+ * }} [options]
+ * @returns {import('./types.js').Stop}
  */
 export function watchDependencies ({ dir, match, name = 'service', log = console.log, onNewer, ...rest } = {}) {
   const stops = installedDeps({ dir, match }).map(({ pkg, version }) => watchForUpdate({
@@ -61,6 +74,11 @@ export function watchDependencies ({ dir, match, name = 'service', log = console
  * caché de un día y el tope de `printUpdateNotice`, así que no hace lenta la orden.
  *
  * Devuelve cuántos avisos imprimió. Lanza lo mismo que `installedDeps`.
+ *
+ * @param {Omit<import('./types.js').NoticeOptions, 'current' | 'source' | 'pkg' | 'product'> & {
+ *   dir?: string, match?: RegExp
+ * }} [options]
+ * @returns {Promise<number>}
  */
 export async function printDependencyNotices ({ dir, match, how = 'bump it in package.json', ...rest } = {}) {
   const printed = await Promise.all(installedDeps({ dir, match }).map((d) => printUpdateNotice({
