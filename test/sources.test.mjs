@@ -163,3 +163,11 @@ test('instalar desde otro registro: npm resuelve las dependencias ahí también'
   assert.equal(r.ok, true)
   assert.match(calls[0], new RegExp(`--registry ${MIRROR}$`))
 })
+
+test('la privada firma igual en DER base64 (el cajón) que en PEM', async () => {
+  const crypto = await import('node:crypto')
+  const pem = crypto.createPrivateKey({ key: Buffer.from(key.privateKey, 'base64'), format: 'der', type: 'pkcs8' }).export({ format: 'pem', type: 'pkcs8' })
+  for (const privateKey of [key.privateKey, pem]) {
+    assert.equal(openSources(signSources(moved(), { privateKey, kid: key.kid }), { keys }).seq, 2)
+  }
+})

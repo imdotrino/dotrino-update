@@ -9,7 +9,8 @@ export function validateSources(d: unknown): import("./types.js").SourcesDirecto
  * ponerse de acuerdo en cómo se ordena un JSON.
  *
  * @param {import('./types.js').SourcesDirectory} directory
- * @param {{ privateKey: string | crypto.KeyObject, kid: string }} key  la privada en PEM
+ * @param {{ privateKey: string | crypto.KeyObject, kid: string }} key  la privada: PKCS#8 DER en
+ *   base64 (una línea, como la guarda el cajón) o PEM
  * @returns {import('./types.js').SignedSources}
  */
 export function signSources(directory: import("./types.js").SourcesDirectory, { privateKey, kid }: {
@@ -30,7 +31,8 @@ export function openSources(envelope: unknown, { keys }?: {
 /**
  * Un par nuevo para firmar el directorio. La privada va al cajón de la bóveda, nunca a un
  * archivo suelto ni a un repo.
- * @returns {{ kid: string, publicKey: string, privateKey: string }}  pública en SPKI DER base64, privada en PEM
+ * @returns {{ kid: string, publicKey: string, privateKey: string }}  las dos en DER base64 (SPKI y
+ *   PKCS#8): una línea cada una, que es lo que cabe en una variable del cajón
  */
 export function generateSourcesKey(): {
     kid: string;
@@ -126,7 +128,8 @@ export const SOURCES_FILE: "sources.json";
 export const BUILTIN_SOURCES: import("./types.js").SourcesDirectory;
 /**
  * Llaves públicas (Ed25519, SPKI DER en base64) que pueden firmar el directorio, por `kid`.
- * Vacío = ningún directorio firmado se acepta todavía: manda el que trae el código.
+ * La privada vive en el cajón `sources` de la bóveda de Dotrino (DOTRINO_SOURCES_KEY), creada
+ * el 2026-11-17. Cambiar de llave = añadir la nueva aquí, publicar, y quitar la vieja después.
  * @type {Readonly<Record<string, string>>}
  */
 export const TRUSTED_KEYS: Readonly<Record<string, string>>;

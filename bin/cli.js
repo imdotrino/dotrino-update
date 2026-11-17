@@ -9,7 +9,7 @@
  *
  *   dotrino-update sources                 el que manda en esta máquina, y de dónde salió
  *   dotrino-update sources keygen          un par nuevo para firmarlo (la privada, al cajón)
- *   dotrino-update sources sign <dir.json> lo firma; la llave en DOTRINO_SOURCES_KEY (PEM)
+ *   dotrino-update sources sign <dir.json> lo firma; la llave en DOTRINO_SOURCES_KEY (DER base64 o PEM)
  *                                          y DOTRINO_SOURCES_KID. Por ejemplo:
  *     dotrino-env run --ns sources -- dotrino-update sources sign dir.json > sources.json
  */

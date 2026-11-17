@@ -66,15 +66,19 @@ export const BUILTIN_SOURCES = Object.freeze({
     releases: Object.freeze(['https://github.com/{repo}/releases/download/{tag}/{file}'])
   }),
   packages: Object.freeze({}),
-  directory: Object.freeze([])
+  // El espejo propio (S3, decisión del dueño 2026-11-17). Aquí se publica cada versión firmada.
+  directory: Object.freeze(['https://dotrino-deps.s3.amazonaws.com/sources.json'])
 })
 
 /**
  * Llaves públicas (Ed25519, SPKI DER en base64) que pueden firmar el directorio, por `kid`.
- * Vacío = ningún directorio firmado se acepta todavía: manda el que trae el código.
+ * La privada vive en el cajón `sources` de la bóveda de Dotrino (DOTRINO_SOURCES_KEY), creada
+ * el 2026-11-17. Cambiar de llave = añadir la nueva aquí, publicar, y quitar la vieja después.
  * @type {Readonly<Record<string, string>>}
  */
-export const TRUSTED_KEYS = Object.freeze({})
+export const TRUSTED_KEYS = Object.freeze({
+  'k-ed30003dbd2c': 'MCowBQYDK2VwAyEAV625XDannXQJpllUJyHQtb1YCtOtD4IAvM+dnZ5PXGk='
+})
 
 /**
  * @param {string} message
@@ -137,14 +141,18 @@ export function validateSources (d) {
  * ponerse de acuerdo en cómo se ordena un JSON.
  *
  * @param {import('./types.js').SourcesDirectory} directory
- * @param {{ privateKey: string | crypto.KeyObject, kid: string }} key  la privada en PEM
+ * @param {{ privateKey: string | crypto.KeyObject, kid: string }} key  la privada: PKCS#8 DER en
+ *   base64 (una línea, como la guarda el cajón) o PEM
  * @returns {import('./types.js').SignedSources}
  */
 export function signSources (directory, { privateKey, kid }) {
   validateSources(directory)
   if (!kid || typeof kid !== 'string') throw fail('signSources: `kid` is required', 'sources-bad-args')
   const payload = JSON.stringify(directory)
-  const sig = crypto.sign(null, Buffer.from(payload, 'utf8'), privateKey).toString('base64')
+  const key = typeof privateKey === 'string' && !privateKey.includes('-----BEGIN')
+    ? crypto.createPrivateKey({ key: Buffer.from(privateKey, 'base64'), format: 'der', type: 'pkcs8' })
+    : privateKey
+  const sig = crypto.sign(null, Buffer.from(payload, 'utf8'), key).toString('base64')
   return { kid, payload, sig }
 }
 
@@ -174,7 +182,8 @@ export function openSources (envelope, { keys = TRUSTED_KEYS } = {}) {
 /**
  * Un par nuevo para firmar el directorio. La privada va al cajón de la bóveda, nunca a un
  * archivo suelto ni a un repo.
- * @returns {{ kid: string, publicKey: string, privateKey: string }}  pública en SPKI DER base64, privada en PEM
+ * @returns {{ kid: string, publicKey: string, privateKey: string }}  las dos en DER base64 (SPKI y
+ *   PKCS#8): una línea cada una, que es lo que cabe en una variable del cajón
  */
 export function generateSourcesKey () {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519')
@@ -182,7 +191,7 @@ export function generateSourcesKey () {
   return {
     kid: 'k-' + crypto.createHash('sha256').update(der).digest('hex').slice(0, 12),
     publicKey: der.toString('base64'),
-    privateKey: /** @type {string} */ (privateKey.export({ format: 'pem', type: 'pkcs8' }))
+    privateKey: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64')
   }
 }
 

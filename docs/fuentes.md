@@ -49,8 +49,8 @@ Se firma el texto exacto, así no hace falta canonicalizar el JSON.
 ## De dónde sale, en orden
 
 1. `DOTRINO_SOURCES`: ruta a un JSON **sin firmar**. Lo pone el dueño de esa máquina.
-2. El último firmado que se bajó (`$XDG_CONFIG_HOME/dotrino/sources.json`), si su `seq` supera al del código.
-3. El del código (`BUILTIN_SOURCES`): npmjs y GitHub.
+1. El último firmado que se bajó (`$XDG_CONFIG_HOME/dotrino/sources.json`), si su `seq` supera al del código.
+2. El del código (`BUILTIN_SOURCES`): npmjs y GitHub.
 
 Si el guardado no pasa la firma, **se para y se dice**: es un fallo o una manipulación, y volver
 en silencio al del código lo taparía.
@@ -73,7 +73,11 @@ de mirar).
 - `dotrino-update sources keygen` da `{ kid, publicKey, privateKey }`. La privada va al cajón
   `sources` de la bóveda de Dotrino; la pública, a `TRUSTED_KEYS` en `src/sources.js`, con una
   versión nueva del paquete.
-- Mientras `TRUSTED_KEYS` esté vacío no se acepta ningún directorio firmado: manda el del código.
+- **La llave vigente es `k-ed30003dbd2c`** (2026-11-17). Cajón `dotrino/sources` de la bóveda de
+  Dotrino: `DOTRINO_SOURCES_KEY` (privada, PKCS#8 DER base64, pide aprobación), y públicas
+  `DOTRINO_SOURCES_KID` y `DOTRINO_SOURCES_PUB`. Aparato del cajón en la PC del dueño: `124B-DA78`.
+- El directorio publicado vive en `https://dotrino-deps.s3.amazonaws.com/sources.json` (≥ 0.11.0
+  lo trae como dirección por defecto).
 
 ## Por qué no es un interruptor remoto (§14)
 
@@ -84,7 +88,6 @@ código.
 
 ## Lo que falta
 
-1. **La llave** y su pública en `TRUSTED_KEYS`.
 2. **Rellenar el espejo en S3** (decisión del dueño). El bucket existe desde el 2026-11-17:
    **`https://dotrino-deps.s3.amazonaws.com/`** (cuenta de Dotrino, us-east-1, versionado, lectura
    y listado públicos; todo lo que contiene es público). Listar es público a propósito: sin ese
@@ -103,6 +106,6 @@ código.
 3. **Una firma del paquete que no dependa del sitio**: el bundle de sigstore del `.tgz`, guardado
    junto a él. Hoy, con npm **y** GitHub caídos a la vez, la medida y el paquete saldrían los dos
    del bucket. Eso es un solo canal, y la pieza no se instala.
-4. **Binarios** (la bóveda): `latestVersion({ source: 'github' })` y las atestaciones siguen yendo
+3. **Binarios** (la bóveda): `latestVersion({ source: 'github' })` y las atestaciones siguen yendo
    a `api.github.com`.
-5. `npm ci` de los servicios desplegados desde git, y las landings que cargan de jsDelivr.
+4. `npm ci` de los servicios desplegados desde git, y las landings que cargan de jsDelivr.
