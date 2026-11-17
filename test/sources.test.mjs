@@ -149,7 +149,7 @@ test('verifyNpmPackage: el paquete del sitio nuevo, la medida del release, y nun
   const ISSUER = 'https://token.actions.githubusercontent.com'
   const bundleFor = (digest) => ({ dsseEnvelope: { payloadType: 'application/vnd.in-toto+json', payload: Buffer.from(JSON.stringify({ predicateType: 'https://slsa.dev/provenance/v1', subject: [{ digest: { sha256: digest } }] })).toString('base64') } })
   const lib = { verify: async () => ({ identity: { subjectAlternativeName: 'https://github.com/imdotrino/dotrino-proxy/.github/workflows/release.yml@refs/tags/v2.0.0', extensions: { issuer: ISSUER } } }) }
-  const withSig = (digest) => async (url) => url.endsWith('.tgz.sigstore.json') ? { ok: true, json: async () => bundleFor(digest) } : fetchImpl(url)
+  const withSig = (digest) => async (url) => url.endsWith('/dotrino-proxy-2.0.0.tgz.sigstore.json') ? { ok: true, json: async () => bundleFor(digest) } : fetchImpl(url)
   const signed = await verifyNpmPackage({ pkg: PKG, version: '2.0.0', repo: 'imdotrino/dotrino-proxy', fetchImpl: withSig(sha256), home, env: {}, sources: oneChannel, sigstore: lib })
   assert.equal(signed.ok, true, signed.ok ? '' : signed.reason)
   if (signed.ok) fs.rmSync(signed.dir, { recursive: true, force: true })

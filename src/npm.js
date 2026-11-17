@@ -325,7 +325,9 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
     if (new URL(tarball).host === measuredHost) {
       const lib = sigstore === undefined ? await loadSigstore() : sigstore
       if (!lib) { rm(dir); return fail('SINGLE_CHANNEL', `${pkg}@${version} and its measurement both come from ${measuredHost}, and the \`sigstore\` package is not installed to check its signature`) }
-      const sigName = `${path.basename(new URL(tarball).pathname)}.sigstore.json`
+      // El nombre que le da `npm pack` (`dotrino-x-1.2.3.tgz`), que es el que lleva la firma en la
+      // release y en el espejo; el del registro (`x-1.2.3.tgz`) es otro.
+      const sigName = `${pkg.replace(/^@/, '').replace('/', '-')}-${version}.tgz.sigstore.json`
       let bundle = null
       for (const url of releaseUrls(where.releases, { repo, tag: tagName, file: sigName })) {
         const r = await getJson(url, { fetchImpl, timeoutMs: 20_000, headers: { 'user-agent': 'dotrino-update' } })

@@ -110,7 +110,9 @@ Lo rellena el `release.yml` de cada repo, después de publicar en npm:
 
 - **Sin token guardado**: el workflow cambia su identidad OIDC por credenciales de un solo uso del
   rol `dotrino-deps-publisher`, que solo puede escribir en `npm/*` y `releases/*`, y solo desde un
-  **tag** de un repo de `imdotrino`. Un colaborador con escritura puede empujar un tag: es el mismo
+  **tag** de un repo de `imdotrino`. La cuenta usa sujetos OIDC **inmutables** (llevan los IDs:
+  `repo:imdotrino@294847950/<repo>@<id>:ref:…`), y la confianza del rol se escribe así
+  (`repo:imdotrino@294847950/*:ref:refs/tags/*`): con el nombre solo, AWS lo rechaza. Un colaborador con escritura puede empujar un tag: es el mismo
   riesgo que ya tiene la publicación en npm, y el bucket versionado deja deshacerlo.
 - **Las dependencias también**, sacadas del `package-lock.json` de una instalación del paquete, y
   comparadas con su `integrity` antes de subirse. Lo que ya está no se vuelve a subir.
@@ -127,6 +129,15 @@ lado: `<x.tgz>.sigstore.json`, en la release de GitHub y en el espejo. Cuando el
 salen **del mismo sitio** (npm y GitHub caídos a la vez, todo desde el bucket), `verifyNpmPackage`
 exige esa firma: un workflow de ese repo construyó ese sha256. Sin el paquete `sigstore` instalado
 o sin el bundle, no se instala (`SINGLE_CHANNEL`).
+
+La firma se busca con el nombre que le da `npm pack` (`dotrino-x-1.2.3.tgz.sigstore.json`), no con el
+del registro (`x-1.2.3.tgz`); la 0.12.0 buscaba el segundo y no la encontraba (arreglado en 0.12.1).
+
+Comprobado el 2026-11-17 con `@dotrino/update` 0.12.0: `npm install --registry` contra el espejo y
+`verifyNpmPackage` con un directorio que solo apunta al bucket aceptan con la firma y niegan sin
+`sigstore`, sin consultar npmjs ni GitHub. **Dependencia que queda:** la librería `sigstore` baja su
+raíz de confianza (TUF) de `tuf-repo-cdn.sigstore.dev` y la guarda en caché; sin caché y sin ese
+sitio, la firma no se puede comprobar.
 
 ## Lo que falta
 
