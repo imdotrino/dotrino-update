@@ -85,7 +85,13 @@ código.
 ## Lo que falta
 
 1. **La llave** y su pública en `TRUSTED_KEYS`.
-2. **El espejo en S3** (decisión del dueño): un registro npm estático y los archivos de las releases.
+2. **Rellenar el espejo en S3** (decisión del dueño). El bucket existe desde el 2026-11-17:
+   **`https://dotrino-deps.s3.amazonaws.com/`** (cuenta de Dotrino, us-east-1, versionado, lectura
+   y listado públicos; todo lo que contiene es público). Listar es público a propósito: sin ese
+   permiso S3 contesta 403 a lo que falta, y la pieza no podría distinguir «no existe» de «no
+   pude mirar». Las URLs con `%2f` (paquetes con scope) funcionan: S3 las decodifica.
+   Base para el directorio: `https://dotrino-deps.s3.amazonaws.com/npm` y
+   `https://dotrino-deps.s3.amazonaws.com/releases/{repo}/{tag}/{file}`.
    Rutas que tiene que servir para `@dotrino/x` 1.2.3:
    - `npm/-/package/@dotrino/x/dist-tags` → `{ "latest": "1.2.3" }`
    - `npm/@dotrino/x` (packument) y `npm/@dotrino/x/1.2.3` (con `dist.tarball` apuntando al bucket)
