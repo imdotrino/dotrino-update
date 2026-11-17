@@ -88,7 +88,7 @@ código.
 
 ## Lo que falta
 
-2. **Rellenar el espejo en S3** (decisión del dueño). El bucket existe desde el 2026-11-17:
+1. **Rellenar el espejo en S3** (decisión del dueño). El bucket existe desde el 2026-11-17:
    **`https://dotrino-deps.s3.amazonaws.com/`** (cuenta de Dotrino, us-east-1, versionado, lectura
    y listado públicos; todo lo que contiene es público). Listar es público a propósito: sin ese
    permiso S3 contesta 403 a lo que falta, y la pieza no podría distinguir «no existe» de «no
@@ -103,7 +103,7 @@ código.
    - las **dependencias de terceros** de cada pieza (su cierre completo), o `npm install --registry`
      no las encuentra.
    Lo rellena un paso del `release.yml` de cada repo.
-3. **Una firma del paquete que no dependa del sitio**: el bundle de sigstore del `.tgz`, guardado
+2. **Una firma del paquete que no dependa del sitio**: el bundle de sigstore del `.tgz`, guardado
    junto a él. Hoy, con npm **y** GitHub caídos a la vez, la medida y el paquete saldrían los dos
    del bucket. Eso es un solo canal, y la pieza no se instala.
 3. **Binarios** (la bóveda): `latestVersion({ source: 'github' })` y las atestaciones siguen yendo
