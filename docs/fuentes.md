@@ -139,13 +139,19 @@ Comprobado el 2026-11-17 con `@dotrino/update` 0.12.0: `npm install --registry` 
 raíz de confianza (TUF) de `tuf-repo-cdn.sigstore.dev` y la guarda en caché; sin caché y sin ese
 sitio, la firma no se puede comprobar.
 
+## Estado (2026-11-17)
+
+- **Directorio publicado: `seq` 2.** `default` = npmjs y GitHub primero, el espejo detrás. Una pieza
+  con `@dotrino/update` ≥ 0.11.0 lo recoge sola en su vuelta diaria.
+- **Rellenan el espejo en cada release:** `dotrino-update` (comprobado: la 0.12.1 se subió sola) y,
+  desde su próximo tag, content, expenses-agent, ia, models, remote-desktop, sealers, terminal y
+  tunnel. Las librerías `@dotrino/*` no llevan el paso: entran como dependencias de esos servicios,
+  verificadas por la `integrity` del lockfile.
+
 ## Lo que falta
 
-1. **Llevar el paso del espejo y la firma a cada `release.yml`** (hoy solo `dotrino-update`).
-   Hasta entonces, mover una pieza al espejo solo sirve para las que ya se suben.
-2. **Añadir el espejo a `default`** del directorio (npm y releases), firmar y publicar: un cambio
-   del directorio, sin versión nueva del código.
-3. **Binarios** (la bóveda): `latestVersion({ source: 'github' })` y las atestaciones siguen yendo
+1. **Que los servicios suban a `@dotrino/update` ≥ 0.12.1.** Hasta entonces no leen el directorio.
+2. **Binarios** (la bóveda): `latestVersion({ source: 'github' })` y las atestaciones siguen yendo
    a `api.github.com`.
-4. `npm ci` de los servicios desplegados desde git, y las landings que cargan de jsDelivr.
-5. Que los servicios suban a ≥ 0.12.0.
+3. `npm ci` de los servicios desplegados desde git, y las landings que cargan de jsDelivr.
+4. La raíz de confianza de `sigstore` (TUF) se baja de `tuf-repo-cdn.sigstore.dev`.
