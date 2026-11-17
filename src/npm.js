@@ -42,6 +42,7 @@ import { execFileSync } from 'node:child_process'
 import { latestVersion, isNewer, CHECK_EVERY_MS } from './index.js'
 import { integrityOf, INTEGRITY_FILE } from './integrity.js'
 import { getJson } from './http.js'
+import { loadSources, refreshSources, sourcesFor, releaseUrls } from './sources.js'
 
 /**
  * @typedef {import('./types.js').Thrown} Thrown
@@ -58,8 +59,6 @@ import { getJson } from './http.js'
  * @typedef {{ ok: false, code: string, reason: string }} Failed
  */
 
-const REGISTRY = 'https://registry.npmjs.org'
-const GITHUB = 'https://github.com'
 const MAX_INTEGRITY_BYTES = 64 * 1024
 /** @param {string} version */
 const DEFAULT_TAG = (version) => `v${version}`
@@ -197,11 +196,10 @@ async function getJsonOrThrow (url, { fetchImpl, timeoutMs = 20_000 }) {
  * El `npm-integrity.json` de la release `v<version>` de ese repo. Sigue la redirección de
  * GitHub, con tope de tiempo y de tamaño (es un JSON de unas líneas: lo que pese más no es eso).
  *
- * @param {{ repo: string, version: string, tagName: string, fetchImpl: FetchLike, timeoutMs?: number }} options
+ * @param {{ url: string, repo: string, tagName: string, fetchImpl: FetchLike, timeoutMs?: number }} options
  * @returns {Promise<Failed | { ok: true, packages: import('./types.js').IntegrityFile['packages'] }>}
  */
-async function fetchIntegrity ({ repo, version, tagName, fetchImpl, timeoutMs = 20_000 }) {
-  const url = `${GITHUB}/${repo}/releases/download/${encodeURIComponent(tagName)}/${INTEGRITY_FILE}`
+async function fetchIntegrity ({ url, repo, tagName, fetchImpl, timeoutMs = 20_000 }) {
   const ac = new AbortController()
   const t = setTimeout(() => ac.abort(), timeoutMs)
   try {
@@ -211,7 +209,7 @@ async function fetchIntegrity ({ repo, version, tagName, fetchImpl, timeoutMs = 
       return fail('INTEGRITY_UNREACHABLE', `could not reach the release of ${repo}: ${err.name === 'AbortError' ? 'timed out' : err.message}`)
     }
     if (r.status === 404) return fail('NO_INTEGRITY_FILE', `the release ${tagName} of ${repo} has no ${INTEGRITY_FILE} (it may predate this check, or the release does not exist)`)
-    if (!r.ok) return fail('INTEGRITY_UNREACHABLE', `GitHub answered ${r.status} for ${INTEGRITY_FILE} of ${repo} ${tagName}`)
+    if (!r.ok) return fail('INTEGRITY_UNREACHABLE', `${new URL(url).host} answered ${r.status} for ${INTEGRITY_FILE} of ${repo} ${tagName}`)
     let bytes
     try { bytes = Buffer.from(await r.arrayBuffer()) } catch (e) {
       const err = /** @type {Error} */ (e)
@@ -235,17 +233,20 @@ async function fetchIntegrity ({ repo, version, tagName, fetchImpl, timeoutMs = 
  * en el disco.
  *
  * @param {{ pkg?: string, version?: string, repo?: string, tag?: (version: string) => string,
- *           fetchImpl?: FetchLike, home?: string, env?: NodeJS.ProcessEnv }} [o]
+ *           fetchImpl?: FetchLike, home?: string, env?: NodeJS.ProcessEnv,
+ *           sources?: import('./types.js').SourcesDirectory }} [o]
  *   `pkg`, `version` y `repo` hacen falta (sin ellos, `BAD_ARGS`). `repo` como
  *   `imdotrino/dotrino-update`; `tag` da el tag de la release de una versión (por defecto
  *   `v<versión>`).
- * @returns {Promise<{ ok: true, file: string, dir: string, integrity: string } |
+ *   `sources`: el directorio de fuentes (sin él, el que manda en esta máquina).
+ * @returns {Promise<{ ok: true, file: string, dir: string, integrity: string, registry: string } |
  *                   { ok: false, code: string, reason: string }>}
  *   códigos: `BAD_ARGS`, `NO_INTEGRITY_FILE` (la release no lo trae), `INTEGRITY_UNREACHABLE`,
  *   `WRONG_PACKAGE` (el JSON no nombra ese paquete en esa versión), `REGISTRY_UNREACHABLE`,
- *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release).
+ *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release),
+ *   `SOURCES_UNREADABLE` (el directorio de fuentes no se puede leer).
  */
-export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG, fetchImpl = fetch, home, env } = {}) {
+export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG, fetchImpl = fetch, home, env, sources } = {}) {
   if (!pkg || !version || !repo) return fail('BAD_ARGS', 'verifyNpmPackage: `pkg`, `version` and `repo` are required')
   // CÓMO SE LLAMA LA RELEASE DE ESA VERSIÓN. Casi siempre `v<versión>`; un repo que publica
   // un paquete junto a otra cosa usa otro prefijo (`agent-v<versión>`), y lo dice quien llama.
@@ -255,21 +256,50 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
     return fail('BAD_ARGS', 'verifyNpmPackage: `tag` must be a function that returns the release tag of a version (a non-empty string without `/` or spaces)')
   }
 
-  // 1. Lo que midió el release, de GitHub.
-  const measured = await fetchIntegrity({ repo, version, tagName, fetchImpl })
-  if (!measured.ok) return measured
+  // DÓNDE ESTÁ CADA COSA LO DICE EL DIRECTORIO (`./sources.js`): por defecto npmjs y las
+  // releases de GitHub; otro sitio si el dueño movió la pieza.
+  let where
+  try { where = sourcesFor(sources || loadSources({ home, env }).sources, { pkg, repo }) } catch (e) {
+    return fail('SOURCES_UNREADABLE', /** @type {Error} */ (e).message)
+  }
+
+  // 1. Lo que midió el release. La primera ubicación que lo tenga.
+  /** @type {Failed | { ok: true, packages: import('./types.js').IntegrityFile['packages'] } | null} */
+  let measured = null
+  let measuredHost = ''
+  /** @type {Failed[]} */
+  const misses = []
+  for (const url of releaseUrls(where.releases, { repo, tag: tagName, file: INTEGRITY_FILE })) {
+    const r = await fetchIntegrity({ url, repo, tagName, fetchImpl })
+    if (r.ok) { measured = r; measuredHost = new URL(url).host; break }
+    misses.push(r)
+  }
+  if (!measured) {
+    if (misses.every((m) => m.code === 'NO_INTEGRITY_FILE')) return misses[0]
+    return fail('INTEGRITY_UNREACHABLE', misses.map((m) => m.reason).join('; '))
+  }
   const want = Object.hasOwn(measured.packages, pkg) ? measured.packages[pkg] : null
   if (!want || want.version !== version || typeof want.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]+=*$/.test(want.integrity)) {
     return fail('WRONG_PACKAGE', `${INTEGRITY_FILE} of ${repo} ${tagName} does not name ${pkg}@${version}${want?.version ? ` (it names ${want.version})` : ''}`)
   }
 
-  // 2. El archivo, de npm.
-  let tarball
-  try {
-    const meta = await getJsonOrThrow(`${REGISTRY}/${regName(pkg)}/${version}`, { fetchImpl })
-    tarball = meta?.dist?.tarball
-    if (typeof tarball !== 'string' || new URL(tarball).origin !== REGISTRY) throw new Error(`unexpected tarball location: ${tarball}`)
-  } catch (e) { return fail('REGISTRY_UNREACHABLE', `could not read ${pkg}@${version} from the registry: ${/** @type {Error} */ (e).message}`) }
+  // 2. El archivo, del primer registro que lo sirva. DOS CANALES: el registro no puede ser el
+  // mismo sitio que dio la medida, o la medida no comprueba nada.
+  let tarball = ''
+  let registry = ''
+  const why = []
+  for (const base of where.npm) {
+    try {
+      const meta = await getJsonOrThrow(`${base}/${regName(pkg)}/${version}`, { fetchImpl })
+      const t = meta?.dist?.tarball
+      if (typeof t !== 'string' || new URL(t).origin !== new URL(base).origin) throw new Error(`unexpected tarball location: ${t}`)
+      if (new URL(t).host === measuredHost) throw new Error(`it is the same place that gave the measurement (${measuredHost}): that is one channel, not two`)
+      tarball = t
+      registry = base
+      break
+    } catch (e) { why.push(`${new URL(base).host}: ${/** @type {Error} */ (e).message}`) }
+  }
+  if (!tarball) return fail('REGISTRY_UNREACHABLE', `could not read ${pkg}@${version} from any registry (${why.join('; ')})`)
 
   const dir = workDir({ home, env })
   try {
@@ -288,7 +318,7 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
       return fail('INTEGRITY_MISMATCH', `what the registry serves as ${pkg}@${version} is not what the release of ${repo} measured (${got.slice(0, 24)}… vs ${want.integrity.slice(0, 24)}…)`)
     }
     fs.writeFileSync(file, bytes, { mode: 0o600 })
-    return { ok: true, file, dir, integrity: got }
+    return { ok: true, file, dir, integrity: got, registry }
   } catch (e) { rm(dir); throw e }
 }
 
@@ -317,7 +347,7 @@ const needsRoot = (pkg, version, prefix) => `the global npm prefix (${prefix}) i
  * pedida. Con `file` instala ESE tarball (el que ya se verificó); sin él, `pkg@version` del
  * registro — que es instalar sin haber comprobado nada: solo para quien verifica por otro lado.
  *
- * @param {{ pkg?: string, version?: string, file?: string | null, run?: RunFn, npm?: string,
+ * @param {{ pkg?: string, version?: string, file?: string | null, registry?: string | null, run?: RunFn, npm?: string,
  *           entry?: string, kind?: InstallKind | null, timeoutMs?: number,
  *           platform?: NodeJS.Platform, access?: (p: string, mode?: number) => void,
  *           readFile?: (p: string, encoding: 'utf8') => string }} [options]
@@ -326,7 +356,7 @@ const needsRoot = (pkg, version, prefix) => `the global npm prefix (${prefix}) i
  *   códigos: `BAD_ARGS`, `not-self-updating`, `needs-root`, `install-failed`.
  */
 export function installNpmGlobal ({
-  pkg, version, file = null, run = execFileSync, npm = findNpm(), entry = process.argv[1], kind = null,
+  pkg, version, file = null, registry = null, run = execFileSync, npm = findNpm(), entry = process.argv[1], kind = null,
   timeoutMs = INSTALL_TIMEOUT_MS, platform, access, readFile = fs.readFileSync
 } = {}) {
   if (!pkg || !version) return fail('BAD_ARGS', 'installNpmGlobal: `pkg` and `version` are required')
@@ -338,7 +368,11 @@ export function installNpmGlobal ({
     return fail('needs-root', needsRoot(pkg, version, dirs.prefix))
   }
   try {
-    run(npm, ['install', '-g', file || `${pkg}@${version}`, '--ignore-scripts', '--no-fund', '--no-audit'], {
+    // `--registry`: las DEPENDENCIAS se resuelven en el mismo registro que dio el paquete. Sin
+    // esto npm iría a npmjs aunque el directorio dijera otro sitio.
+    const args = ['install', '-g', file || `${pkg}@${version}`, '--ignore-scripts', '--no-fund', '--no-audit']
+    if (registry) args.push('--registry', registry)
+    run(npm, args, {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs
     })
   } catch (e) {
@@ -711,12 +745,23 @@ export function updatePrefsCommand (args = [], { dir, lang = 'es' } = {}) {
 export async function selfUpdateNpm ({
   pkg, current, repo, tag = DEFAULT_TAG, mayUpdate = null, onInstalled = null, onNeedsRoot = null,
   log = () => {}, dir = null, entry = process.argv[1], run = execFileSync, fetchImpl = fetch,
-  env = process.env, npm = findNpm(), home, platform, access, readFile, now = Date.now
+  env = process.env, npm = findNpm(), home, platform, access, readFile, now = Date.now, sources = undefined
 } = {}) {
   if (!pkg || !repo) return fail('could-not-check', 'selfUpdateNpm: `pkg` and `repo` are required')
+  // ANTES DE MIRAR: ¿el directorio de fuentes cambió? Si el dueño movió esta pieza a otro
+  // sitio, es aquí donde se entera. Que no se pueda mirar no para nada: se sigue con el último
+  // directorio verificado, y se dice.
+  if (!sources) {
+    const fresh = await refreshSources({ home, env, fetchImpl })
+    if (!fresh.ok) log(`[update] sources: ${fresh.reason}`)
+    else if (fresh.updated) log(`[update] sources: new directory (seq ${fresh.seq}) from ${fresh.from}`)
+    try { sources = loadSources({ home, env }).sources } catch (e) {
+      return fail('could-not-check', /** @type {Error} */ (e).message)
+    }
+  }
   // `isNewer` da false si `current` no es una versión, y eso se leería como «al día».
   if (typeof current !== 'string' || !/^\d+\.\d+\.\d+$/.test(current.trim())) return fail('could-not-check', `selfUpdateNpm: \`current\` is not a version: ${current}`)
-  const latest = await latestVersion({ source: 'npm', pkg, fetchImpl, product: pkg, version: current })
+  const latest = await latestVersion({ source: 'npm', pkg, fetchImpl, product: pkg, version: current, sources })
   if (!latest.ok) return fail('could-not-check', latest.reason)
   if (!isNewer(latest.version, current)) return { ok: true, code: 'up-to-date', version: current }
   const version = latest.version
@@ -806,13 +851,13 @@ export async function selfUpdateNpm ({
     }
   }
 
-  const v = await verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env })
+  const v = await verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env, sources })
   if (!v.ok) {
     log(`[update] ${pkg} ${version} NOT installed: ${v.reason}`)
     return out('unverified', v.reason, { why: v.code })
   }
   let done
-  try { done = installNpmGlobal({ pkg, version, file: v.file, run, npm, kind, platform, access, readFile }) } finally { rm(v.dir) }
+  try { done = installNpmGlobal({ pkg, version, file: v.file, registry: v.registry, run, npm, kind, platform, access, readFile }) } finally { rm(v.dir) }
   if (!done.ok) {
     log(`[update] ${pkg} ${version} NOT installed: ${done.reason}`)
     return out(done.code, done.reason)

@@ -364,6 +364,20 @@ Las piezas sueltas (`installKind`, `verifyNpmPackage`, `installNpmGlobal`, `supe
 `findNpm`, `takeUpdateMarker`) se exportan para quien arme otro flujo; `buildIntegrity`,
 `packageOfTarball` e `integrityOf` están en `@dotrino/update/integrity`.
 
+## Dónde se baja: el directorio de fuentes (`@dotrino/update/sources`)
+
+Nada de lo de arriba tiene escrito en el código dónde se baja una pieza. Lo pregunta a un
+**directorio firmado** con registros npm y plantillas de release, por defecto y por pieza. Hoy
+apunta a npmjs y GitHub. Si una pieza se mueve, se cambia su entrada y la pieza busca en el sitio
+nuevo en su siguiente vuelta. Las dependencias también, porque `npm install` recibe `--registry`.
+
+```bash
+dotrino-update sources                   # el que manda en esta máquina, y de dónde salió
+DOTRINO_SOURCES=./mio.json mi-servicio   # fijarlo a mano en una máquina (sin firma)
+```
+
+Formato, firma y lo que falta: [`docs/fuentes.md`](docs/fuentes.md).
+
 ## Instalar un binario
 
 No lo hace este paquete: dónde va un binario es cosa de cada producto (un `.deb` pide root,

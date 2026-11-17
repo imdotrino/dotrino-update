@@ -1,6 +1,6 @@
 {
   "name": "@dotrino/update",
-  "version": "0.9.4",
+  "version": "0.10.0",
   "description": "Enterarse de que hay versión nueva, traerla verificada e instalarla sola. Para los daemons, servicios y CLIs del ecosistema Dotrino.",
   "type": "module",
   "main": "src/index.js",
@@ -33,6 +33,10 @@
     "./integrity": {
       "types": "./types/integrity.d.ts",
       "import": "./src/integrity.js"
+    },
+    "./sources": {
+      "types": "./types/sources.d.ts",
+      "import": "./src/sources.js"
     }
   },
   "bin": {
@@ -41,6 +45,7 @@
   "files": [
     "bin",
     "src",
+    "docs",
     "types",
     "README.md",
     "LICENSE"

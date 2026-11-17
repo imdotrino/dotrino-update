@@ -21,7 +21,7 @@ export function isNewer(a: string | null | undefined, b: string | null | undefin
  * @param {LatestOptions} [options]
  * @returns {Promise<LatestResult>}
  */
-export function latestVersion({ source, repo, pkg, tagPrefix, fetchImpl, timeoutMs, product, version }?: LatestOptions): Promise<LatestResult>;
+export function latestVersion({ source, repo, pkg, tagPrefix, fetchImpl, timeoutMs, product, version, sources }?: LatestOptions): Promise<LatestResult>;
 /**
  * ¿Hay algo más nuevo que lo que corro? Es lo ÚNICO que una pieza hace sola y sin pedir
  * permiso, porque es una lectura.

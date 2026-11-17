@@ -35,6 +35,7 @@
  */
 
 import { getJson } from './http.js'
+import { loadSources, sourcesFor } from './sources.js'
 
 /**
  * @typedef {import('./types.js').LatestOptions} LatestOptions
@@ -99,17 +100,28 @@ const get = (url, { fetchImpl, timeoutMs, headers = {}, product, version }) =>
  * @returns {Promise<LatestResult>}
  */
 export async function latestVersion ({
-  source, repo, pkg, tagPrefix, fetchImpl = fetch, timeoutMs = 10_000, product, version
+  source, repo, pkg, tagPrefix, fetchImpl = fetch, timeoutMs = 10_000, product, version, sources
 } = {}) {
   const opts = { fetchImpl, timeoutMs, product, version }
   if (source === 'npm') {
     if (!pkg) return { ok: false, reason: 'latestVersion: `pkg` is required with source "npm"' }
-    // El endpoint corto: solo el dist-tag, sin el documento entero del paquete (que son
-    // megabytes en un paquete con historia).
-    const r = await get(`https://registry.npmjs.org/-/package/${encodeURIComponent(pkg)}/dist-tags`, opts)
-    if (!r.ok) return r
-    const v = r.body?.latest
-    return valid(v) ? { ok: true, version: v, source: 'npm', pkg } : { ok: false, reason: `unreadable dist-tag: ${v}` }
+    // DÓNDE MIRAR LO DICE EL DIRECTORIO (`./sources.js`), no el código: npmjs hoy, otro sitio
+    // el día que el dueño mueva la pieza o npm falle. Los registros, en orden.
+    let registries
+    try { registries = sourcesFor(sources || loadSources().sources, { pkg }).npm } catch (e) {
+      return { ok: false, reason: /** @type {Error} */ (e).message }
+    }
+    const why = []
+    for (const registry of registries) {
+      // El endpoint corto: solo el dist-tag, sin el documento entero del paquete (que son
+      // megabytes en un paquete con historia). Un directorio estático lo sirve como archivo.
+      const r = await get(`${registry}/-/package/${encodeURIComponent(pkg)}/dist-tags`, opts)
+      if (!r.ok) { why.push(r.reason); continue }
+      const v = r.body?.latest
+      if (valid(v)) return { ok: true, version: v, source: 'npm', pkg, registry }
+      why.push(`${new URL(registry).host}: unreadable dist-tag: ${v}`)
+    }
+    return { ok: false, reason: why.join('; ') }
   }
   if (source === 'github') {
     if (!repo) return { ok: false, reason: 'latestVersion: `repo` is required with source "github"' }

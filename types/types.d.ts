@@ -55,10 +55,12 @@ export interface LatestOptions {
   product?: string
   /** Para el user-agent: la versión que corre. */
   version?: string
+  /** El directorio de fuentes; sin él, `loadSources()` (el que manda en esta máquina). */
+  sources?: SourcesDirectory
 }
 
 export type LatestOk =
-  | { ok: true, version: string, source: 'npm', pkg: string }
+  | { ok: true, version: string, source: 'npm', pkg: string, registry: string }
   | { ok: true, version: string, source: 'github', repo: string, assets: ReleaseAsset[], url: string }
 
 export type LatestResult = LatestOk | Failure
@@ -195,6 +197,8 @@ export interface SelfUpdateResult {
 }
 
 export interface SelfUpdateOptions {
+  /** El directorio de fuentes; sin él, se refresca y se carga el de esta máquina. */
+  sources?: SourcesDirectory
   pkg?: string
   current?: string
   repo?: string
@@ -221,4 +225,30 @@ export interface WatchSelfUpdateOptions extends SelfUpdateOptions {
   retryMs?: number
   onResult?: ((r: SelfUpdateResult) => void) | null
   onUpdated?: ((x: { version: string, from: string }) => unknown) | null
+}
+
+/** Dónde buscar una pieza: registros npm y plantillas de release, en orden. */
+export interface SourcesEntry {
+  npm?: readonly string[]
+  releases?: readonly string[]
+}
+
+/** El directorio de fuentes (`@dotrino/update/sources`). */
+export interface SourcesDirectory {
+  v: 1
+  /** Sube en cada versión; nunca se acepta uno menor ni igual. */
+  seq: number
+  issued: string
+  default: Required<SourcesEntry>
+  /** Por nombre de paquete o `owner/repo`: lo que cambia para esa pieza. */
+  packages: Readonly<Record<string, SourcesEntry>>
+  /** Dónde leer la versión siguiente de este directorio. */
+  directory: readonly string[]
+}
+
+/** Un directorio firmado: la firma (Ed25519, base64) es del texto exacto de `payload`. */
+export interface SignedSources {
+  kid: string
+  payload: string
+  sig: string
 }

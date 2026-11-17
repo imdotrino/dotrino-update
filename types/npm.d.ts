@@ -44,17 +44,20 @@ export function supervised({ env }?: {
  * en el disco.
  *
  * @param {{ pkg?: string, version?: string, repo?: string, tag?: (version: string) => string,
- *           fetchImpl?: FetchLike, home?: string, env?: NodeJS.ProcessEnv }} [o]
+ *           fetchImpl?: FetchLike, home?: string, env?: NodeJS.ProcessEnv,
+ *           sources?: import('./types.js').SourcesDirectory }} [o]
  *   `pkg`, `version` y `repo` hacen falta (sin ellos, `BAD_ARGS`). `repo` como
  *   `imdotrino/dotrino-update`; `tag` da el tag de la release de una versión (por defecto
  *   `v<versión>`).
- * @returns {Promise<{ ok: true, file: string, dir: string, integrity: string } |
+ *   `sources`: el directorio de fuentes (sin él, el que manda en esta máquina).
+ * @returns {Promise<{ ok: true, file: string, dir: string, integrity: string, registry: string } |
  *                   { ok: false, code: string, reason: string }>}
  *   códigos: `BAD_ARGS`, `NO_INTEGRITY_FILE` (la release no lo trae), `INTEGRITY_UNREACHABLE`,
  *   `WRONG_PACKAGE` (el JSON no nombra ese paquete en esa versión), `REGISTRY_UNREACHABLE`,
- *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release).
+ *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release),
+ *   `SOURCES_UNREADABLE` (el directorio de fuentes no se puede leer).
  */
-export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env }?: {
+export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env, sources }?: {
     pkg?: string;
     version?: string;
     repo?: string;
@@ -62,11 +65,13 @@ export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env
     fetchImpl?: FetchLike;
     home?: string;
     env?: NodeJS.ProcessEnv;
+    sources?: import("./types.js").SourcesDirectory;
 }): Promise<{
     ok: true;
     file: string;
     dir: string;
     integrity: string;
+    registry: string;
 } | {
     ok: false;
     code: string;
@@ -77,7 +82,7 @@ export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env
  * pedida. Con `file` instala ESE tarball (el que ya se verificó); sin él, `pkg@version` del
  * registro — que es instalar sin haber comprobado nada: solo para quien verifica por otro lado.
  *
- * @param {{ pkg?: string, version?: string, file?: string | null, run?: RunFn, npm?: string,
+ * @param {{ pkg?: string, version?: string, file?: string | null, registry?: string | null, run?: RunFn, npm?: string,
  *           entry?: string, kind?: InstallKind | null, timeoutMs?: number,
  *           platform?: NodeJS.Platform, access?: (p: string, mode?: number) => void,
  *           readFile?: (p: string, encoding: 'utf8') => string }} [options]
@@ -85,10 +90,11 @@ export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env
  * @returns {{ ok: true, version: string } | Failed}
  *   códigos: `BAD_ARGS`, `not-self-updating`, `needs-root`, `install-failed`.
  */
-export function installNpmGlobal({ pkg, version, file, run, npm, entry, kind, timeoutMs, platform, access, readFile }?: {
+export function installNpmGlobal({ pkg, version, file, registry, run, npm, entry, kind, timeoutMs, platform, access, readFile }?: {
     pkg?: string;
     version?: string;
     file?: string | null;
+    registry?: string | null;
     run?: RunFn;
     npm?: string;
     entry?: string;
@@ -222,7 +228,7 @@ export function updatePrefsCommand(args?: string[], { dir, lang }?: {
  * @param {SelfUpdateOptions} [options]
  * @returns {Promise<SelfUpdateResult>}
  */
-export function selfUpdateNpm({ pkg, current, repo, tag, mayUpdate, onInstalled, onNeedsRoot, log, dir, entry, run, fetchImpl, env, npm, home, platform, access, readFile, now }?: SelfUpdateOptions): Promise<SelfUpdateResult>;
+export function selfUpdateNpm({ pkg, current, repo, tag, mayUpdate, onInstalled, onNeedsRoot, log, dir, entry, run, fetchImpl, env, npm, home, platform, access, readFile, now, sources }?: SelfUpdateOptions): Promise<SelfUpdateResult>;
 /**
  * EL VIGÍA DE UN DAEMON: `selfUpdateNpm` al arrancar y una vez al día. Si no se pudo mirar
  * (la red todavía no está, el registro no contesta) se reintenta en una hora en vez de
