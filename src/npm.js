@@ -43,6 +43,8 @@ import { latestVersion, isNewer, CHECK_EVERY_MS } from './index.js'
 import { integrityOf, INTEGRITY_FILE } from './integrity.js'
 import { getJson } from './http.js'
 import { loadSources, refreshSources, sourcesFor, releaseUrls } from './sources.js'
+import { loadSigstore, verifyBundles } from './fetch.js'
+import crypto from 'node:crypto'
 
 /**
  * @typedef {import('./types.js').Thrown} Thrown
@@ -234,7 +236,7 @@ async function fetchIntegrity ({ url, repo, tagName, fetchImpl, timeoutMs = 20_0
  *
  * @param {{ pkg?: string, version?: string, repo?: string, tag?: (version: string) => string,
  *           fetchImpl?: FetchLike, home?: string, env?: NodeJS.ProcessEnv,
- *           sources?: import('./types.js').SourcesDirectory }} [o]
+ *           sources?: import('./types.js').SourcesDirectory, sigstore?: import('./types.js').SigstoreLib | null }} [o]
  *   `pkg`, `version` y `repo` hacen falta (sin ellos, `BAD_ARGS`). `repo` como
  *   `imdotrino/dotrino-update`; `tag` da el tag de la release de una versión (por defecto
  *   `v<versión>`).
@@ -244,9 +246,10 @@ async function fetchIntegrity ({ url, repo, tagName, fetchImpl, timeoutMs = 20_0
  *   códigos: `BAD_ARGS`, `NO_INTEGRITY_FILE` (la release no lo trae), `INTEGRITY_UNREACHABLE`,
  *   `WRONG_PACKAGE` (el JSON no nombra ese paquete en esa versión), `REGISTRY_UNREACHABLE`,
  *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release),
- *   `SOURCES_UNREADABLE` (el directorio de fuentes no se puede leer).
+ *   `SOURCES_UNREADABLE` (el directorio de fuentes no se puede leer), `SINGLE_CHANNEL` (paquete y
+ *   medida del mismo sitio y sin firma con qué comprobarlo), `BAD_SIGNATURE`.
  */
-export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG, fetchImpl = fetch, home, env, sources } = {}) {
+export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG, fetchImpl = fetch, home, env, sources, sigstore = undefined } = {}) {
   if (!pkg || !version || !repo) return fail('BAD_ARGS', 'verifyNpmPackage: `pkg`, `version` and `repo` are required')
   // CÓMO SE LLAMA LA RELEASE DE ESA VERSIÓN. Casi siempre `v<versión>`; un repo que publica
   // un paquete junto a otra cosa usa otro prefijo (`agent-v<versión>`), y lo dice quien llama.
@@ -283,8 +286,8 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
     return fail('WRONG_PACKAGE', `${INTEGRITY_FILE} of ${repo} ${tagName} does not name ${pkg}@${version}${want?.version ? ` (it names ${want.version})` : ''}`)
   }
 
-  // 2. El archivo, del primer registro que lo sirva. DOS CANALES: el registro no puede ser el
-  // mismo sitio que dio la medida, o la medida no comprueba nada.
+  // 2. El archivo, del primer registro que lo sirva. Si es el MISMO sitio que dio la medida,
+  // la medida sola no comprueba nada (un solo canal): entonces hace falta la firma (paso 4).
   let tarball = ''
   let registry = ''
   const why = []
@@ -293,7 +296,6 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
       const meta = await getJsonOrThrow(`${base}/${regName(pkg)}/${version}`, { fetchImpl })
       const t = meta?.dist?.tarball
       if (typeof t !== 'string' || new URL(t).origin !== new URL(base).origin) throw new Error(`unexpected tarball location: ${t}`)
-      if (new URL(t).host === measuredHost) throw new Error(`it is the same place that gave the measurement (${measuredHost}): that is one channel, not two`)
       tarball = t
       registry = base
       break
@@ -316,6 +318,23 @@ export async function verifyNpmPackage ({ pkg, version, repo, tag = DEFAULT_TAG,
     if (got !== want.integrity) {
       rm(dir)
       return fail('INTEGRITY_MISMATCH', `what the registry serves as ${pkg}@${version} is not what the release of ${repo} measured (${got.slice(0, 24)}… vs ${want.integrity.slice(0, 24)}…)`)
+    }
+    // 4. UN SOLO CANAL → LA FIRMA. Pasa con el espejo propio cuando npm y GitHub fallan a la vez:
+    // el paquete y su medida salen del mismo bucket. La firma de sigstore la hizo el workflow
+    // del repo y vale venga de donde venga; sin ella no se instala.
+    if (new URL(tarball).host === measuredHost) {
+      const lib = sigstore === undefined ? await loadSigstore() : sigstore
+      if (!lib) { rm(dir); return fail('SINGLE_CHANNEL', `${pkg}@${version} and its measurement both come from ${measuredHost}, and the \`sigstore\` package is not installed to check its signature`) }
+      const sigName = `${path.basename(new URL(tarball).pathname)}.sigstore.json`
+      let bundle = null
+      for (const url of releaseUrls(where.releases, { repo, tag: tagName, file: sigName })) {
+        const r = await getJson(url, { fetchImpl, timeoutMs: 20_000, headers: { 'user-agent': 'dotrino-update' } })
+        if (r.ok) { bundle = r.body; break }
+      }
+      if (!bundle) { rm(dir); return fail('SINGLE_CHANNEL', `${pkg}@${version} and its measurement both come from ${measuredHost}, and no signature (${sigName}) was found`) }
+      const sha256 = crypto.createHash('sha256').update(bytes).digest('hex')
+      const v = await verifyBundles([bundle], { sha256, repo, lib })
+      if (!v.ok) { rm(dir); return fail('BAD_SIGNATURE', v.reason) }
     }
     fs.writeFileSync(file, bytes, { mode: 0o600 })
     return { ok: true, file, dir, integrity: got, registry }

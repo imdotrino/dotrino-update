@@ -30,6 +30,11 @@ export function pickAsset(assets: ReleaseAsset[] | null | undefined, match: Asse
  */
 export function download(asset: ReleaseAsset, { fetchImpl, dir, product, version }?: DownloadOptions): Promise<string>;
 /**
+ * La librería de sigstore, si la pieza la instaló.
+ * @returns {Promise<SigstoreLib | null>}
+ */
+export function loadSigstore(): Promise<SigstoreLib | null>;
+/**
  * @param {string} file
  * @param {{ repo?: string, fetchImpl?: FetchLike, sigstore?: SigstoreLib | null }} [options]
  *   `sigstore`: la librería ya cargada (`null` = no hay); sin pasarla se carga sola.
@@ -39,6 +44,20 @@ export function verifyArtifact(file: string, { repo, fetchImpl, sigstore }?: {
     repo?: string;
     fetchImpl?: FetchLike;
     sigstore?: SigstoreLib | null;
+}): Promise<VerifyResult>;
+/**
+ * ¿Alguno de estos bundles de sigstore es una procedencia de compilación de ESE sha256, firmada
+ * por un workflow de ESE repo? No mira de dónde salió el bundle: la firma vale venga de donde
+ * venga, y por eso sirve para verificar lo que se baja de un espejo.
+ *
+ * @param {any[]} bundles
+ * @param {{ sha256: string, repo: string, lib: SigstoreLib }} options
+ * @returns {Promise<VerifyResult>}
+ */
+export function verifyBundles(bundles: any[], { sha256, repo, lib }: {
+    sha256: string;
+    repo: string;
+    lib: SigstoreLib;
 }): Promise<VerifyResult>;
 /**
  * Bajar y verificar, que es lo que casi siempre se quiere junto. No instala: eso es del producto.

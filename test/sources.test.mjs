@@ -138,12 +138,23 @@ test('verifyNpmPackage: el paquete del sitio nuevo, la medida del release, y nun
   assert.equal(ok.ok && ok.registry, MIRROR)
   if (ok.ok) fs.rmSync(ok.dir, { recursive: true, force: true })
 
-  // la medida y el paquete del MISMO sitio: un canal, no dos
+  // la medida y el paquete del MISMO sitio: un canal, no dos → hace falta la firma
   const oneChannel = { ...moved(), packages: { [PKG]: { npm: [MIRROR], releases: ['https://deps.example.com/rel/{repo}/{tag}/{file}'] } } }
-  const bad = await verifyNpmPackage({ pkg: PKG, version: '2.0.0', repo: 'imdotrino/dotrino-proxy', fetchImpl, home, env: {}, sources: oneChannel })
-  assert.equal(bad.ok, false)
-  assert.equal(!bad.ok && bad.code, 'REGISTRY_UNREACHABLE')
-  assert.match(!bad.ok ? bad.reason : '', /one channel/)
+  const bad = await verifyNpmPackage({ pkg: PKG, version: '2.0.0', repo: 'imdotrino/dotrino-proxy', fetchImpl, home, env: {}, sources: oneChannel, sigstore: null })
+  assert.equal(!bad.ok && bad.code, 'SINGLE_CHANNEL')
+
+  // con la firma del workflow del repo, sí
+  const crypto = await import('node:crypto')
+  const sha256 = crypto.createHash('sha256').update(TGZ).digest('hex')
+  const ISSUER = 'https://token.actions.githubusercontent.com'
+  const bundleFor = (digest) => ({ dsseEnvelope: { payloadType: 'application/vnd.in-toto+json', payload: Buffer.from(JSON.stringify({ predicateType: 'https://slsa.dev/provenance/v1', subject: [{ digest: { sha256: digest } }] })).toString('base64') } })
+  const lib = { verify: async () => ({ identity: { subjectAlternativeName: 'https://github.com/imdotrino/dotrino-proxy/.github/workflows/release.yml@refs/tags/v2.0.0', extensions: { issuer: ISSUER } } }) }
+  const withSig = (digest) => async (url) => url.endsWith('.tgz.sigstore.json') ? { ok: true, json: async () => bundleFor(digest) } : fetchImpl(url)
+  const signed = await verifyNpmPackage({ pkg: PKG, version: '2.0.0', repo: 'imdotrino/dotrino-proxy', fetchImpl: withSig(sha256), home, env: {}, sources: oneChannel, sigstore: lib })
+  assert.equal(signed.ok, true, signed.ok ? '' : signed.reason)
+  if (signed.ok) fs.rmSync(signed.dir, { recursive: true, force: true })
+  const otherFile = await verifyNpmPackage({ pkg: PKG, version: '2.0.0', repo: 'imdotrino/dotrino-proxy', fetchImpl: withSig('00'.repeat(32)), home, env: {}, sources: oneChannel, sigstore: lib })
+  assert.equal(!otherFile.ok && otherFile.code, 'BAD_SIGNATURE')
 })
 
 test('instalar desde otro registro: npm resuelve las dependencias ahí también', () => {

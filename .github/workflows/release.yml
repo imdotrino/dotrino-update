@@ -75,6 +75,17 @@ jobs:
           node bin/cli.js integrity ./*.tgz > npm-integrity.json
           cat npm-integrity.json
 
+      # LA FIRMA DEL PAQUETE, QUE NO DEPENDE DEL SITIO (CONVENCIONES §15.2). Cuando el paquete y su
+      # medida salen del mismo espejo (npm y GitHub caídos a la vez), esto es lo que deja
+      # comprobarlo: lo firmó este workflow, y vale venga de donde venga.
+      - name: Atestiguar el paquete
+        id: attest-tgz
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: '*.tgz'
+      - name: La firma junto a cada .tgz
+        run: for f in *.tgz; do cp "${{ steps.attest-tgz.outputs.bundle-path }}" "$f.sigstore.json"; done
+
       # La procedencia sale sola: npm la genera y la firma, sin `--provenance`.
       - name: Publicar en npm ESE archivo
         run: npm publish ./*.tgz --access public
@@ -84,4 +95,23 @@ jobs:
           files: |
             sbom-*.cdx.json
             npm-integrity.json
+            *.tgz.sigstore.json
           generate_release_notes: true
+
+      # EL ESPEJO PROPIO (CONVENCIONES §15.2): el paquete, sus dependencias, la medida y la firma,
+      # en el directorio estático de S3. Así, si npm o GitHub fallan, el directorio de fuentes
+      # puede mandar ahí. Credenciales por OIDC: ningún token guardado en el repo.
+      - name: Instalar el paquete para saber sus dependencias
+        run: mkdir mirror-deps && cd mirror-deps && npm init -y >/dev/null && npm install ../*.tgz --ignore-scripts --no-audit --no-fund
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::147464502454:role/dotrino-deps-publisher
+          aws-region: us-east-1
+      # Este es el paquete que trae el comando, así que usa el suyo; los demás repos usan
+      # `npx --yes @dotrino/update@latest mirror …`.
+      - name: Subir al espejo
+        run: |
+          node bin/cli.js mirror --repo "${{ github.repository }}" --tag "${{ github.ref_name }}" \
+            --lock mirror-deps/package-lock.json --release npm-integrity.json \
+            $(for f in *.tgz.sigstore.json; do echo --release "$f"; done) \
+            --upload s3://dotrino-deps ./*.tgz

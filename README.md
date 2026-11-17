@@ -376,7 +376,10 @@ dotrino-update sources                   # el que manda en esta máquina, y de d
 DOTRINO_SOURCES=./mio.json mi-servicio   # fijarlo a mano en una máquina (sin firma)
 ```
 
-Formato, firma y lo que falta: [`docs/fuentes.md`](docs/fuentes.md).
+Para que haya algo en el espejo, cada `release.yml` corre `dotrino-update mirror` (el paquete, sus
+dependencias, la medida y la firma de sigstore al bucket, con credenciales OIDC).
+
+Formato, firma, el espejo y lo que falta: [`docs/fuentes.md`](docs/fuentes.md).
 
 ## Instalar un binario
 

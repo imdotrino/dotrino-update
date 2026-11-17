@@ -87,7 +87,7 @@ const PROVENANCE = /^https:\/\/slsa\.dev\/provenance\//
  * La librería de sigstore, si la pieza la instaló.
  * @returns {Promise<SigstoreLib | null>}
  */
-async function loadSigstore () {
+export async function loadSigstore () {
   try { return await import('sigstore') } catch (e) {
     if (/** @type {import('./types.js').Thrown} */ (e)?.code === 'ERR_MODULE_NOT_FOUND') return null
     throw e
@@ -121,6 +121,19 @@ export async function verifyArtifact (file, { repo, fetchImpl = fetch, sigstore 
   if (!bundles.length) {
     return { ok: false, code: 'NO_ATTESTATION', reason: `GitHub has no attestation for this file (sha256 ${hash}): it was not built by the release of ${repo}` }
   }
+  return verifyBundles(bundles, { sha256: hash, repo, lib })
+}
+
+/**
+ * ¿Alguno de estos bundles de sigstore es una procedencia de compilación de ESE sha256, firmada
+ * por un workflow de ESE repo? No mira de dónde salió el bundle: la firma vale venga de donde
+ * venga, y por eso sirve para verificar lo que se baja de un espejo.
+ *
+ * @param {any[]} bundles
+ * @param {{ sha256: string, repo: string, lib: SigstoreLib }} options
+ * @returns {Promise<VerifyResult>}
+ */
+export async function verifyBundles (bundles, { sha256, repo, lib }) {
   // Basta UNA atestación que cuadre entera; si ninguna, se dice por qué falló la última.
   let why = ''
   for (const bundle of bundles) {
@@ -133,7 +146,7 @@ export async function verifyArtifact (file, { repo, fetchImpl = fetch, sigstore 
       if (env?.payloadType !== 'application/vnd.in-toto+json') throw new Error('the attestation is not an in-toto statement')
       const statement = JSON.parse(Buffer.from(env.payload, 'base64').toString('utf8'))
       if (!PROVENANCE.test(String(statement.predicateType))) throw new Error(`not a build provenance (${statement.predicateType})`)
-      if (!(statement.subject || []).some((/** @type {any} */ s) => s?.digest?.sha256 === hash)) throw new Error('the attestation is for another file')
+      if (!(statement.subject || []).some((/** @type {any} */ s) => s?.digest?.sha256 === sha256)) throw new Error('the attestation is for another file')
       return { ok: true, out: `verified: built by ${who}` }
     } catch (e) { why = /** @type {Error} */ (e).message }
   }

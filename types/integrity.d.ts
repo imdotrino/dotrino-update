@@ -8,6 +8,16 @@ export function packageOfTarball(bytes: Buffer | Uint8Array): {
     version: string;
 };
 /**
+ * El `package/package.json` ENTERO de un `.tgz` (lo que un registro sirve como manifiesto de
+ * esa versión: dependencias, `bin`, `engines`…).
+ * @param {Buffer | Uint8Array} bytes
+ * @returns {Record<string, any> & { name: string, version: string }}
+ */
+export function manifestOfTarball(bytes: Buffer | Uint8Array): Record<string, any> & {
+    name: string;
+    version: string;
+};
+/**
  * El contenido de `npm-integrity.json` para esos `.tgz`:
  * `{ v: 1, packages: { "<nombre>": { version, integrity } } }`. Un repo puede publicar varios
  * paquetes; dos tarballs del MISMO paquete es un error, no «gana el último».

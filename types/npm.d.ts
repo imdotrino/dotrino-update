@@ -45,7 +45,7 @@ export function supervised({ env }?: {
  *
  * @param {{ pkg?: string, version?: string, repo?: string, tag?: (version: string) => string,
  *           fetchImpl?: FetchLike, home?: string, env?: NodeJS.ProcessEnv,
- *           sources?: import('./types.js').SourcesDirectory }} [o]
+ *           sources?: import('./types.js').SourcesDirectory, sigstore?: import('./types.js').SigstoreLib | null }} [o]
  *   `pkg`, `version` y `repo` hacen falta (sin ellos, `BAD_ARGS`). `repo` como
  *   `imdotrino/dotrino-update`; `tag` da el tag de la release de una versión (por defecto
  *   `v<versión>`).
@@ -55,9 +55,10 @@ export function supervised({ env }?: {
  *   códigos: `BAD_ARGS`, `NO_INTEGRITY_FILE` (la release no lo trae), `INTEGRITY_UNREACHABLE`,
  *   `WRONG_PACKAGE` (el JSON no nombra ese paquete en esa versión), `REGISTRY_UNREACHABLE`,
  *   `DOWNLOAD_FAILED`, `INTEGRITY_MISMATCH` (lo que da npm no es lo que midió el release),
- *   `SOURCES_UNREADABLE` (el directorio de fuentes no se puede leer).
+ *   `SOURCES_UNREADABLE` (el directorio de fuentes no se puede leer), `SINGLE_CHANNEL` (paquete y
+ *   medida del mismo sitio y sin firma con qué comprobarlo), `BAD_SIGNATURE`.
  */
-export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env, sources }?: {
+export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env, sources, sigstore }?: {
     pkg?: string;
     version?: string;
     repo?: string;
@@ -66,6 +67,7 @@ export function verifyNpmPackage({ pkg, version, repo, tag, fetchImpl, home, env
     home?: string;
     env?: NodeJS.ProcessEnv;
     sources?: import("./types.js").SourcesDirectory;
+    sigstore?: import("./types.js").SigstoreLib | null;
 }): Promise<{
     ok: true;
     file: string;

@@ -86,26 +86,55 @@ repo, y la medida y el paquete no pueden venir del mismo sitio (dos canales). Un
 puede mandar a un sitio vacío: la pieza deja de actualizarse y sigue corriendo. No puede colar
 código.
 
+## El espejo: `dotrino-update mirror` (≥ 0.12.0)
+
+El bucket: **`https://dotrino-deps.s3.amazonaws.com/`** (cuenta de Dotrino, us-east-1, versionado,
+lectura y listado públicos; todo lo que contiene es público). Listar es público a propósito: sin
+ese permiso S3 contesta 403 a lo que falta, y la pieza no distinguiría «no existe» de «no pude
+mirar». Las URLs con `%2f` (paquetes con scope) funcionan: S3 las decodifica.
+
+Lo rellena el `release.yml` de cada repo, después de publicar en npm:
+
+```yaml
+- name: Instalar el paquete para saber sus dependencias
+  run: mkdir mirror-deps && cd mirror-deps && npm init -y >/dev/null && npm install ../*.tgz --ignore-scripts --no-audit --no-fund
+- uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: arn:aws:iam::147464502454:role/dotrino-deps-publisher
+    aws-region: us-east-1
+- run: |
+    npx --yes @dotrino/update@latest mirror --repo "${{ github.repository }}" --tag "${{ github.ref_name }}" \
+      --lock mirror-deps/package-lock.json --release npm-integrity.json \
+      $(for f in *.tgz.sigstore.json; do echo --release "$f"; done) --upload s3://dotrino-deps ./*.tgz
+```
+
+- **Sin token guardado**: el workflow cambia su identidad OIDC por credenciales de un solo uso del
+  rol `dotrino-deps-publisher`, que solo puede escribir en `npm/*` y `releases/*`, y solo desde un
+  **tag** de un repo de `imdotrino`. Un colaborador con escritura puede empujar un tag: es el mismo
+  riesgo que ya tiene la publicación en npm, y el bucket versionado deja deshacerlo.
+- **Las dependencias también**, sacadas del `package-lock.json` de una instalación del paquete, y
+  comparadas con su `integrity` antes de subirse. Lo que ya está no se vuelve a subir.
+- **El packument se suma, nunca se pisa a ciegas**; los packuments se suben al final.
+
+Rutas para `@dotrino/x` 1.2.3: `npm/-/package/@dotrino/x/dist-tags`, `npm/@dotrino/x`,
+`npm/@dotrino/x/1.2.3`, `npm/@dotrino/x/-/x-1.2.3.tgz`, y
+`releases/imdotrino/dotrino-x/v1.2.3/{npm-integrity.json, x-1.2.3.tgz.sigstore.json}`.
+
+## La firma que no depende del sitio (≥ 0.12.0)
+
+El `release.yml` atestigua cada `.tgz` (`actions/attest-build-provenance`) y deja el bundle al
+lado: `<x.tgz>.sigstore.json`, en la release de GitHub y en el espejo. Cuando el paquete y su medida
+salen **del mismo sitio** (npm y GitHub caídos a la vez, todo desde el bucket), `verifyNpmPackage`
+exige esa firma: un workflow de ese repo construyó ese sha256. Sin el paquete `sigstore` instalado
+o sin el bundle, no se instala (`SINGLE_CHANNEL`).
+
 ## Lo que falta
 
-1. **Rellenar el espejo en S3** (decisión del dueño). El bucket existe desde el 2026-11-17:
-   **`https://dotrino-deps.s3.amazonaws.com/`** (cuenta de Dotrino, us-east-1, versionado, lectura
-   y listado públicos; todo lo que contiene es público). Listar es público a propósito: sin ese
-   permiso S3 contesta 403 a lo que falta, y la pieza no podría distinguir «no existe» de «no
-   pude mirar». Las URLs con `%2f` (paquetes con scope) funcionan: S3 las decodifica.
-   Base para el directorio: `https://dotrino-deps.s3.amazonaws.com/npm` y
-   `https://dotrino-deps.s3.amazonaws.com/releases/{repo}/{tag}/{file}`.
-   Rutas que tiene que servir para `@dotrino/x` 1.2.3:
-   - `npm/-/package/@dotrino/x/dist-tags` → `{ "latest": "1.2.3" }`
-   - `npm/@dotrino/x` (packument) y `npm/@dotrino/x/1.2.3` (con `dist.tarball` apuntando al bucket)
-   - `npm/@dotrino/x/-/x-1.2.3.tgz`
-   - `releases/imdotrino/dotrino-x/v1.2.3/npm-integrity.json`
-   - las **dependencias de terceros** de cada pieza (su cierre completo), o `npm install --registry`
-     no las encuentra.
-   Lo rellena un paso del `release.yml` de cada repo.
-2. **Una firma del paquete que no dependa del sitio**: el bundle de sigstore del `.tgz`, guardado
-   junto a él. Hoy, con npm **y** GitHub caídos a la vez, la medida y el paquete saldrían los dos
-   del bucket. Eso es un solo canal, y la pieza no se instala.
+1. **Llevar el paso del espejo y la firma a cada `release.yml`** (hoy solo `dotrino-update`).
+   Hasta entonces, mover una pieza al espejo solo sirve para las que ya se suben.
+2. **Añadir el espejo a `default`** del directorio (npm y releases), firmar y publicar: un cambio
+   del directorio, sin versión nueva del código.
 3. **Binarios** (la bóveda): `latestVersion({ source: 'github' })` y las atestaciones siguen yendo
    a `api.github.com`.
 4. `npm ci` de los servicios desplegados desde git, y las landings que cargan de jsDelivr.
+5. Que los servicios suban a ≥ 0.12.0.

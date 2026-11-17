@@ -34,6 +34,17 @@ export const integrityOf = (bytes) => 'sha512-' + crypto.createHash('sha512').up
  * @returns {{ name: string, version: string }}
  */
 export function packageOfTarball (bytes) {
+  const { name, version } = manifestOfTarball(bytes)
+  return { name, version }
+}
+
+/**
+ * El `package/package.json` ENTERO de un `.tgz` (lo que un registro sirve como manifiesto de
+ * esa versión: dependencias, `bin`, `engines`…).
+ * @param {Buffer | Uint8Array} bytes
+ * @returns {Record<string, any> & { name: string, version: string }}
+ */
+export function manifestOfTarball (bytes) {
   let tar
   try { tar = zlib.gunzipSync(bytes) } catch (e) { throw fail('bad-tarball', `not a gzip tarball: ${/** @type {Error} */ (e).message}`) }
   for (let at = 0; at + 512 <= tar.length;) {
@@ -49,7 +60,7 @@ export function packageOfTarball (bytes) {
       let pkg
       try { pkg = JSON.parse(tar.subarray(at + 512, at + 512 + size).toString('utf8')) } catch (e) { throw fail('bad-tarball', `its package.json cannot be read: ${/** @type {Error} */ (e).message}`) }
       if (typeof pkg?.name !== 'string' || typeof pkg?.version !== 'string') throw fail('bad-tarball', 'its package.json has no name or version')
-      return { name: pkg.name, version: pkg.version }
+      return pkg
     }
     at += 512 + Math.ceil(size / 512) * 512
   }
