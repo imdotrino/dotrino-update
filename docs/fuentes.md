@@ -49,8 +49,8 @@ Se firma el texto exacto, así no hace falta canonicalizar el JSON.
 ## De dónde sale, en orden
 
 1. `DOTRINO_SOURCES`: ruta a un JSON **sin firmar**. Lo pone el dueño de esa máquina.
-1. El último firmado que se bajó (`$XDG_CONFIG_HOME/dotrino/sources.json`), si su `seq` supera al del código.
-2. El del código (`BUILTIN_SOURCES`): npmjs y GitHub.
+2. El último firmado que se bajó (`$XDG_CONFIG_HOME/dotrino/sources.json`), si su `seq` supera al del código.
+3. El del código (`BUILTIN_SOURCES`): npmjs y GitHub.
 
 Si el guardado no pasa la firma, **se para y se dice**: es un fallo o una manipulación, y volver
 en silencio al del código lo taparía.
