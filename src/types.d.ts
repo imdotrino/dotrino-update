@@ -10,7 +10,7 @@ export type Thrown = Error & { code?: string, stderr?: string | Buffer }
 
 /** Un proceso hijo síncrono (`execFileSync`, o su doble en las pruebas). */
 export type RunFn = (file: string, args: string[], options: {
-  encoding: 'utf8', stdio: Array<'ignore' | 'pipe'>, timeout?: number
+  encoding: 'utf8', stdio: Array<'ignore' | 'pipe'>, timeout?: number, windowsHide?: boolean
 }) => string | Buffer
 
 /** «No se pudo»: un resultado, no una excepción. */

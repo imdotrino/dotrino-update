@@ -106,7 +106,7 @@ export function findNpm ({ execPath = process.execPath, platform = process.platf
  */
 function npmGlobalRoot ({ run, npm }) {
   try {
-    return String(run(npm, ['root', '-g'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 }) || '').trim() || null
+    return String(run(npm, ['root', '-g'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000, windowsHide: true }) || '').trim() || null
   } catch (_) { return null }
 }
 
@@ -394,7 +394,7 @@ export function installNpmGlobal ({
     const args = ['install', '-g', file || `${pkg}@${version}`, '--ignore-scripts', '--no-fund', '--no-audit']
     if (registry) args.push('--registry', registry)
     run(npm, args, {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, windowsHide: true
     })
   } catch (e) {
     const err = /** @type {Thrown} */ (e)

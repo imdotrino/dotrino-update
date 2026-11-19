@@ -19,7 +19,7 @@ const short = (sha) => String(sha).slice(0, 7)
  * @param {string} dir
  * @param {string[]} args
  */
-const git = (run, dir, args) => String(run('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
+const git = (run, dir, args) => String(run('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })).trim()
 
 /**
  * ¿Lo que corre es lo que hay en la rama? Cuatro respuestas, y ninguna se confunde con otra:
